@@ -489,7 +489,7 @@
                   } else throw new Error("Invalid fraction format");
                 } else if (unicodeFractions[part]) {
                   // Handle unicode fractions
-                  totalQuantity += unicodeFractions[part];
+                  totalQuantity += unicodeFifications[part];
                 } else {
                   // Handle whole numbers or decimals
                   const num = parseFloat(part);
@@ -804,6 +804,7 @@
           description:
             "A rich and hearty meat sauce simmered slowly and served over pasta. Comfort food at its best.",
           type: "Dinner",
+          cuisine: "Italian", // Added cuisine
           dietaryTypes: ["Dairy-Free"],
           tags: ["Weeknight", "Comfort Food"],
           prepTime: 20, // Stored in minutes
@@ -849,6 +850,7 @@
           description:
             "A light and refreshing salad, perfect for a quick lunch or side dish. Easily customizable.",
           type: "Lunch",
+          cuisine: "American", // Added cuisine
           dietaryTypes: ["Vegan", "Gluten-Free"],
           tags: ["Quick", "Healthy", "Vegan"],
           prepTime: 15,
@@ -890,6 +892,7 @@
           description:
             "Juicy, classic beef burgers perfect for grilling or pan-frying. A crowd-plEaser for any occasion.",
           type: "Dinner",
+          cuisine: "American", // Added cuisine
           dietaryTypes: [],
           tags: ["Grill", "Quick", "Kid-Friendly"],
           prepTime: 10,
@@ -945,6 +948,7 @@
                   ...recipe,
                   tags: recipe.tags || [], // Ensure tags array exists
                   description: recipe.description || "", // Ensure description exists
+                  cuisine: recipe.cuisine || "", // Ensure cuisine exists
                   dietaryTypes: recipe.dietaryTypes || [], // Ensure dietaryTypes exists
                   ingredients: recipe.ingredients || [], // Ensure ingredients exists
                   directions: recipe.directions || [], // Ensure directions exists
@@ -965,6 +969,7 @@
                 ...recipe,
                 tags: recipe.tags || [],
                 description: recipe.description || "",
+                cuisine: recipe.cuisine || "", // Ensure cuisine exists
                 dietaryTypes: recipe.dietaryTypes || [],
                 ingredients: recipe.ingredients || [],
                 directions: recipe.directions || [],
@@ -1033,6 +1038,7 @@
             ...r,
             tags: r.tags || [],
             description: r.description || "",
+            cuisine: r.cuisine || "", // Ensure cuisine exists
             dietaryTypes: r.dietaryTypes || [],
             ingredients: r.ingredients || [],
             directions: r.directions || [],
@@ -1270,6 +1276,7 @@
                 Math.random().toString(36).substr(2, 5), // Generate unique ID
               ...recipeData,
               description: recipeData.description || "", // Ensure description exists
+              cuisine: recipeData.cuisine || "", // Ensure cuisine exists
               tags: recipeData.tags || [], // Ensure tags is an array
               dietaryTypes: recipeData.dietaryTypes || [],
               ingredients: recipeData.ingredients || [],
@@ -1297,6 +1304,7 @@
                       ...r, // Keep existing fields like id, createdAt, isFavorite
                       ...recipeData, // Overwrite with new data
                       description: recipeData.description || "", // Ensure description exists
+                      cuisine: recipeData.cuisine || "", // Ensure cuisine exists
                       tags: recipeData.tags || [], // Ensure tags is an array
                       dietaryTypes: recipeData.dietaryTypes || [],
                       ingredients: recipeData.ingredients || [],
@@ -1392,66 +1400,39 @@
           (query, filters) => {
             filters = filters || {}; // Ensure filters object exists
             const normalizedQuery = query ? query.toLowerCase().trim() : "";
-            const normalizedTagQuery = filters.tag
-              ? filters.tag.toLowerCase().trim()
-              : ""; // For exact tag matching
 
             return recipes.filter((recipe) => {
               // Basic check for valid recipe object
               if (!recipe || typeof recipe.name !== "string") return false;
 
-              // --- Query Matching ---
+              // --- Query Matching (ONLY by name or type) ---
               let matchesQuery = !normalizedQuery; // True if query is empty
               if (normalizedQuery) {
                 const nameMatch = recipe.name
                   .toLowerCase()
                   .includes(normalizedQuery);
-                const descriptionMatch = recipe.description // Search description too
-                  ?.toLowerCase()
-                  .includes(normalizedQuery);
-                const ingredientMatch = recipe.ingredients?.some(
-                  (ing) =>
-                    typeof ing === "string" &&
-                    ing.toLowerCase().includes(normalizedQuery)
-                );
                 const typeMatch = recipe.type
                   ?.toLowerCase()
                   .includes(normalizedQuery);
-                const dietaryMatch = recipe.dietaryTypes?.some(
-                  (type) =>
-                    typeof type === "string" &&
-                    type.toLowerCase().includes(normalizedQuery)
-                );
-                const tagMatch = recipe.tags?.some(
-                  (tag) =>
-                    typeof tag === "string" &&
-                    tag.toLowerCase().includes(normalizedQuery)
-                );
-                const tipsMatch = recipe.tipsAndTricks?.some(
-                  (tip) =>
-                    typeof tip === "string" &&
-                    tip.toLowerCase().includes(normalizedQuery)
-                );
 
-                // Default: search across multiple fields including description
-                matchesQuery =
-                  nameMatch ||
-                  descriptionMatch || // Added description match
-                  ingredientMatch ||
-                  typeMatch ||
-                  dietaryMatch ||
-                  tagMatch ||
-                  tipsMatch;
+                // Only search by name or type
+                matchesQuery = nameMatch || typeMatch;
               }
 
               // --- Filter Matching ---
               const matchesType = filters.type
                 ? recipe.type === filters.type
                 : true;
+              const matchesCuisine = filters.cuisine
+                ? recipe.cuisine === filters.cuisine
+                : true; // New cuisine filter
               const matchesDietary = filters.dietaryType
                 ? recipe.dietaryTypes?.includes(filters.dietaryType)
                 : true;
               // Tag filter requires exact match (case-insensitive)
+              const normalizedTagQuery = filters.tag
+                ? filters.tag.toLowerCase().trim()
+                : "";
               const matchesTag = normalizedTagQuery
                 ? recipe.tags?.some(
                     (tag) => tag.toLowerCase() === normalizedTagQuery
@@ -1477,6 +1458,7 @@
               return (
                 matchesQuery &&
                 matchesType &&
+                matchesCuisine && // Include cuisine in filter logic
                 matchesDietary &&
                 matchesTag &&
                 matchesFavorite &&
@@ -1674,6 +1656,16 @@
                   recipe.description
                 )}</p>`
               : "";
+            const typeHtml = recipe.type
+              ? `<p style="font-size: 9pt; color: #777;">Type: ${escapeHTML(
+                  recipe.type
+                )}</p>`
+              : "";
+            const cuisineHtml = recipe.cuisine
+              ? `<p style="font-size: 9pt; color: #777;">Cuisine: ${escapeHTML(
+                  recipe.cuisine
+                )}</p>`
+              : ""; // Added cuisine HTML
             const dietaryTypesHtml =
               Array.isArray(recipe.dietaryTypes) &&
               recipe.dietaryTypes.length > 0
@@ -1762,9 +1754,11 @@
             content.innerHTML = `
               <div style="text-align: center; margin-bottom: 10px;">
                 <h1 style="color: #2ecc71; margin: 0 0 8px 0; font-size: 20pt; font-weight: bold;">${recipeName}</h1>
-                <p style="margin: 0; font-size: 11pt; color: #555;">Type: ${escapeHTML(
-                  recipe.type || "N/A"
-                )} | Servings: ${recipe.servings || "N/A"}</p>
+                <p style="margin: 0; font-size: 11pt; color: #555;">Servings: ${
+                  recipe.servings || "N/A"
+                }</p>
+                ${typeHtml}
+                ${cuisineHtml}
                 ${dietaryTypesHtml}
                 ${tagsHtml}
               </div>
@@ -1824,7 +1818,7 @@
             // --- PDF Generation Options ---
             const opt = {
               margin: 0.5, // Margins in inches
-              filename: `${recipeName
+              filename: `${recipe.name
                 .toLowerCase()
                 .replace(/[^a-z0-9]+/g, "-")}-recipe.pdf`, // Sanitize filename
               image: { type: "jpeg", quality: 0.95 }, // Image settings
@@ -2168,6 +2162,7 @@
                                 name: recipe.name?.trim() || "Untitled Recipe",
                                 description: recipe.description?.trim() || "",
                                 type: recipe.type?.trim() || "Other",
+                                cuisine: recipe.cuisine?.trim() || "", // Import cuisine
                                 // Ensure arrays are valid and elements are trimmed
                                 dietaryTypes: Array.isArray(recipe.dietaryTypes)
                                   ? recipe.dietaryTypes
@@ -2486,6 +2481,7 @@
         const [filters, setFilters] = useState({
           query: "",
           type: "",
+          cuisine: "", // New cuisine filter state
           dietaryType: "",
           tag: "",
           cookTime: "",
@@ -2500,6 +2496,7 @@
           const isFilterActive =
             filters.query ||
             filters.type ||
+            filters.cuisine || // Include cuisine in active filter check
             filters.dietaryType ||
             filters.tag ||
             filters.cookTime ||
@@ -2533,6 +2530,7 @@
               setFilters({
                 query: "",
                 type: "",
+                cuisine: "", // Clear cuisine filter
                 dietaryType: "",
                 tag: "",
                 cookTime: "",
@@ -2570,6 +2568,7 @@
         // Determine if any filters are active (excluding the 'hideAllExplicitly' state itself and query from this check, as query is handled separately for "no results")
         const hasActiveFiltersExcludingQuery =
           filters.type ||
+          filters.cuisine || // Include cuisine in active filter check
           filters.dietaryType ||
           filters.tag ||
           filters.cookTime ||
@@ -2596,6 +2595,23 @@
                   .map((t) => (
                     <option key={t} value={t}>
                       {t}
+                    </option>
+                  ))}
+              </select>
+              {/* New Cuisine Filter */}
+              <select
+                name="cuisine"
+                value={filters.cuisine}
+                onChange={handleFilterChange}
+                className="filter-select text-xs sm:text-sm"
+                aria-label="Filter by Cuisine"
+              >
+                <option value="">All Cuisines</option>
+                {[...new Set(recipes.map((r) => r?.cuisine).filter(Boolean))]
+                  .sort()
+                  .map((c) => (
+                    <option key={c} value={c}>
+                      {c}
                     </option>
                   ))}
               </select>
@@ -2748,6 +2764,13 @@
                           <i className="fas fa-utensils opacity-70"></i>{" "}
                           {escapeHTML(recipe.type)}
                         </span>
+                        {/* Cuisine Badge */}
+                        {recipe.cuisine && (
+                          <span className="inline-flex items-center gap-1 bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300 px-2 py-0.5 rounded-full">
+                            <i className="fas fa-globe opacity-70"></i>{" "}
+                            {escapeHTML(recipe.cuisine)}
+                          </span>
+                        )}
                         {/* Dietary Badges */}
                         {recipe.dietaryTypes?.map((diet) => (
                           <span
@@ -2922,6 +2945,7 @@
             name: "",
             description: "",
             type: "",
+            cuisine: "", // Added cuisine to initial state
             dietaryTypes: "",
             tags: [],
             // Time fields will be broken into hours/minutes for input
@@ -2966,6 +2990,7 @@
               name: editingRecipe.name || "",
               description: editingRecipe.description || "", // Populate description
               type: editingRecipe.type || "",
+              cuisine: editingRecipe.cuisine || "", // Populate cuisine
               dietaryTypes: Array.isArray(editingRecipe.dietaryTypes)
                 ? editingRecipe.dietaryTypes.join(", ")
                 : "",
@@ -3156,6 +3181,7 @@
               name: formData.name.trim(),
               description: formData.description.trim(), // Add description
               type: formData.type.trim(),
+              cuisine: formData.cuisine.trim(), // Save cuisine
               // Split dietary types string by comma, trim whitespace, filter out empty strings
               dietaryTypes: formData.dietaryTypes
                 .split(",")
@@ -3242,6 +3268,32 @@
           "Spices/Seasoning/Marinades",
           "Steaks",
           "Wraps",
+        ].sort();
+        const cuisineTypes = [
+          "American",
+          "Asian",
+          "Mexican",
+          "Italian",
+          "Indian",
+          "Mediterranean",
+          "French",
+          "Japanese",
+          "Chinese",
+          "Thai",
+          "Vietnamese",
+          "Korean",
+          "Middle Eastern",
+          "African",
+          "Caribbean",
+          "South American",
+          "German",
+          "Spanish",
+          "Greek",
+          "British",
+          "Australian",
+          "Canadian",
+          "Fusion",
+          "Other",
         ].sort();
         const dietaryTypesList = [
           "Gluten-Free",
@@ -3408,6 +3460,31 @@
                     />
                     <ErrorMessage name="yield" />
                   </div>
+                </div>
+
+                {/* Cuisine */}
+                <div>
+                  <label
+                    htmlFor="cuisine"
+                    className="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300"
+                  >
+                    Cuisine <span className="text-xs">(optional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    id="cuisine"
+                    name="cuisine"
+                    value={formData.cuisine}
+                    onChange={handleChange}
+                    list="cuisine-types"
+                    className="modal-input border-gray-300 dark:border-gray-600"
+                    placeholder="e.g., Italian, Mexican, American"
+                  />
+                  <datalist id="cuisine-types">
+                    {cuisineTypes.map((c) => (
+                      <option key={c} value={c} />
+                    ))}
+                  </datalist>
                 </div>
 
                 {/* Dietary Types */}
@@ -4012,6 +4089,13 @@
                       <i className="fas fa-utensils op-70"></i>{" "}
                       {escapeHTML(recipe.type)}
                     </span>
+                    {/* Cuisine Badge */}
+                    {recipe.cuisine && (
+                      <span className="inline-flex items-center gap-1 bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300 px-2 py-0.5 rounded-full">
+                        <i className="fas fa-globe op-70"></i>{" "}
+                        {escapeHTML(recipe.cuisine)}
+                      </span>
+                    )}
                     {recipe.dietaryTypes?.map((t) => (
                       <span
                         key={t}
@@ -4366,7 +4450,8 @@
             .filter(
               (r) =>
                 r?.name?.toLowerCase().includes(query) ||
-                r?.type?.toLowerCase().includes(query)
+                r?.type?.toLowerCase().includes(query) ||
+                r?.cuisine?.toLowerCase().includes(query) // Include cuisine in search for selector
             )
             .sort((a, b) => a.name.localeCompare(b.name));
         }, [recipes, selectorSearch]); // Dependencies: recipes list and search query
