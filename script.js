@@ -937,20 +937,22 @@ const speak = (text, onEnd = null) => {
 // --- TIME DETECTION IN TEXT ---
 const detectTimeInStep = (stepText) => {
   const text = stepText.toLowerCase();
+  const timers = [];
 
   // Patterns to match time expressions
   const patterns = [
     // "5 minutes", "10 mins", "2 min"
-    /(\d+)\s*(minute|minutes|min|mins)/i,
+    /(\d+)\s*(minute|minutes|min|mins)/gi,
     // "1 hour", "2 hours"
-    /(\d+)\s*(hour|hours|hr|hrs)/i,
+    /(\d+)\s*(hour|hours|hr|hrs)/gi,
     // "30 seconds", "45 secs"
-    /(\d+)\s*(second|seconds|sec|secs)/i,
+    /(\d+)\s*(second|seconds|sec|secs)/gi,
   ];
 
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match) {
+  // Find ALL time matches in the text
+  patterns.forEach((pattern) => {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
       const value = parseInt(match[1]);
       const unit = match[2].toLowerCase();
 
@@ -963,8 +965,21 @@ const detectTimeInStep = (stepText) => {
         seconds = value;
       }
 
-      return {
-        found: true,
+      const displayText = `${value} ${
+        unit.includes("hour") || unit.includes("hr")
+          ? value > 1
+            ? "hours"
+            : "hour"
+          : unit.includes("minute") || unit.includes("min")
+            ? value > 1
+              ? "minutes"
+              : "minute"
+            : value > 1
+              ? "seconds"
+              : "second"
+      }`;
+
+      timers.push({
         value: value,
         unit:
           unit.includes("hour") || unit.includes("hr")
@@ -973,24 +988,90 @@ const detectTimeInStep = (stepText) => {
               ? "minute"
               : "second",
         seconds: seconds,
-        displayText: `${value} ${
-          unit.includes("hour") || unit.includes("hr")
-            ? value > 1
-              ? "hours"
-              : "hour"
-            : unit.includes("minute") || unit.includes("min")
-              ? value > 1
-                ? "minutes"
-                : "minute"
-              : value > 1
-                ? "seconds"
-                : "second"
-        }`,
-      };
+        displayText: displayText,
+      });
     }
-  }
+  });
 
-  return { found: false };
+  return {
+    found: timers.length > 0,
+    timers: timers,
+    // For backwards compatibility, return first timer
+    ...(timers.length > 0 ? timers[0] : {}),
+  };
+};
+
+// --- TIMER COMPLETION SOUND ---
+let alarmAudioContext = null;
+let alarmOscillator = null;
+let alarmGainNode = null;
+let alarmInterval = null;
+
+const playTimerSound = () => {
+  try {
+    // Stop any existing alarm
+    stopTimerSound();
+
+    // Create continuous alarm sound using Web Audio API
+    alarmAudioContext = new (
+      window.AudioContext || window.webkitAudioContext
+    )();
+
+    const playBeep = () => {
+      if (!alarmAudioContext) return;
+
+      alarmOscillator = alarmAudioContext.createOscillator();
+      alarmGainNode = alarmAudioContext.createGain();
+
+      alarmOscillator.connect(alarmGainNode);
+      alarmGainNode.connect(alarmAudioContext.destination);
+
+      // Attention-grabbing beep pattern
+      alarmOscillator.frequency.value = 880; // A5 note
+      alarmOscillator.type = "sine";
+
+      alarmGainNode.gain.setValueAtTime(0.3, alarmAudioContext.currentTime);
+      alarmGainNode.gain.exponentialRampToValueAtTime(
+        0.01,
+        alarmAudioContext.currentTime + 0.3,
+      );
+
+      alarmOscillator.start(alarmAudioContext.currentTime);
+      alarmOscillator.stop(alarmAudioContext.currentTime + 0.3);
+    };
+
+    // Play first beep immediately
+    playBeep();
+
+    // Then repeat every 800ms for continuous alarm
+    alarmInterval = setInterval(playBeep, 800);
+  } catch (err) {
+    console.log("Could not play timer sound:", err);
+  }
+};
+
+const stopTimerSound = () => {
+  try {
+    if (alarmInterval) {
+      clearInterval(alarmInterval);
+      alarmInterval = null;
+    }
+    if (alarmOscillator) {
+      try {
+        alarmOscillator.stop();
+      } catch (e) {
+        // Oscillator already stopped
+      }
+      alarmOscillator = null;
+    }
+    if (alarmAudioContext) {
+      alarmAudioContext.close();
+      alarmAudioContext = null;
+    }
+    alarmGainNode = null;
+  } catch (err) {
+    console.log("Error stopping alarm:", err);
+  }
 };
 
 // --- INGREDIENT CATEGORY DETECTION ---
@@ -8805,8 +8886,11 @@ const CookingModeModal = ({
   const [isTTSPaused, setIsTTSPaused] = useState(false);
   const [waitingForTimer, setWaitingForTimer] = useState(false);
   const [activeStepTimer, setActiveStepTimer] = useState(null);
+  const [currentTimerIndex, setCurrentTimerIndex] = useState(0); // Track which timer in sequence
+  const [showTimerAlert, setShowTimerAlert] = useState(false); // Show alert when timer completes
   const voiceControlRef = useRef(null);
   const stepTimerRef = useRef(null);
+  const autoReadTimeoutRef = useRef(null);
 
   const steps = recipe.directions || [];
   const totalSteps = steps.length;
@@ -8831,6 +8915,14 @@ const CookingModeModal = ({
       if (voiceControlRef.current) {
         voiceControlRef.current.stop();
       }
+      if (stepTimerRef.current) {
+        clearTimeout(stepTimerRef.current);
+      }
+      if (autoReadTimeoutRef.current) {
+        clearTimeout(autoReadTimeoutRef.current);
+      }
+      stopTimerSound();
+      window.speechSynthesis.cancel();
     };
   }, []);
 
@@ -8953,27 +9045,69 @@ const CookingModeModal = ({
   };
 
   // Handler for step-specific timer button
-  const handleStepTimer = (seconds, displayText) => {
+  const handleStepTimer = (seconds, displayText, timerIndex) => {
     addTimer(seconds, `Step ${currentStep + 1}: ${displayText}`);
     addToast(`${displayText} timer started`, "success");
     setWaitingForTimer(false);
 
     // Set reference to track this timer
-    setActiveStepTimer(seconds);
+    setActiveStepTimer({ seconds, displayText, timerIndex });
 
-    // After timer completes, resume TTS auto-advance
+    // After timer completes, play alarm
     stepTimerRef.current = setTimeout(() => {
+      playTimerSound(); // Start continuous alarm
+      setShowTimerAlert(true); // Show dismissal modal
+      setActiveStepTimer(null);
+    }, seconds * 1000);
+  };
+
+  // Handle timer dismissal - advance to next timer or next step
+  const handleDismissTimer = () => {
+    stopTimerSound(); // Stop the alarm
+    setShowTimerAlert(false);
+
+    // Check if there are more timers in this step
+    if (
+      currentStepTime.found &&
+      currentStepTime.timers &&
+      currentStepTime.timers.length > 0
+    ) {
+      const nextTimerIndex = currentTimerIndex + 1;
+
+      if (nextTimerIndex < currentStepTime.timers.length) {
+        // More timers in this step - move to next timer
+        setCurrentTimerIndex(nextTimerIndex);
+        addToast(
+          `Timer ${currentTimerIndex + 1} complete. Start timer ${nextTimerIndex + 1} when ready.`,
+          "info",
+        );
+      } else {
+        // All timers complete in this step
+        setCurrentTimerIndex(0);
+
+        // Auto-advance to next step if enabled
+        if (autoReadEnabled && currentStep < totalSteps - 1) {
+          addToast("All timers complete! Moving to next step...", "success");
+          setTimeout(() => {
+            setCurrentStep((prev) => prev + 1);
+          }, 1000);
+        } else if (currentStep === totalSteps - 1) {
+          addToast("All timers complete!", "success");
+        } else {
+          addToast("All timers complete! Tap next when ready.", "success");
+        }
+      }
+    } else {
+      // No timers or timer info missing - just advance if auto-read enabled
       if (autoReadEnabled && currentStep < totalSteps - 1) {
         addToast("Timer complete! Moving to next step...", "success");
         setTimeout(() => {
           setCurrentStep((prev) => prev + 1);
-          setActiveStepTimer(null);
         }, 1000);
       } else {
         addToast("Timer complete!", "success");
-        setActiveStepTimer(null);
       }
-    }, seconds * 1000);
+    }
   };
 
   // Cleanup timer on unmount or step change
@@ -8982,15 +9116,46 @@ const CookingModeModal = ({
       if (stepTimerRef.current) {
         clearTimeout(stepTimerRef.current);
       }
+      stopTimerSound(); // Stop alarm if navigating away
     };
+  }, [currentStep]);
+
+  // Reset timer index when step changes
+  useEffect(() => {
+    setCurrentTimerIndex(0);
+    stopTimerSound(); // Stop any active alarm
+    setShowTimerAlert(false);
   }, [currentStep]);
 
   // Auto-read when step changes if auto-read is enabled
   useEffect(() => {
-    if (autoReadEnabled && !isReading) {
-      handleReadStep();
+    // Clear any pending auto-read
+    if (autoReadTimeoutRef.current) {
+      clearTimeout(autoReadTimeoutRef.current);
     }
-  }, [currentStep, autoReadEnabled]);
+
+    if (autoReadEnabled && !isReading && !waitingForTimer && !showTimerAlert) {
+      // Delay to ensure state is settled and TTS is ready
+      autoReadTimeoutRef.current = setTimeout(() => {
+        // Double-check conditions before reading
+        if (autoReadEnabled && !isReading) {
+          handleReadStep();
+        }
+      }, 300);
+    }
+
+    return () => {
+      if (autoReadTimeoutRef.current) {
+        clearTimeout(autoReadTimeoutRef.current);
+      }
+    };
+  }, [
+    currentStep,
+    autoReadEnabled,
+    isReading,
+    waitingForTimer,
+    showTimerAlert,
+  ]);
 
   const progress = ((currentStep + 1) / totalSteps) * 100;
 
@@ -9005,6 +9170,10 @@ const CookingModeModal = ({
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setVoiceEnabled(!voiceEnabled)}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  setVoiceEnabled(!voiceEnabled);
+                }}
                 className={`btn-modal ${voiceEnabled ? "btn-green" : "btn-gray"}`}
                 title="Toggle voice control"
               >
@@ -9014,6 +9183,10 @@ const CookingModeModal = ({
               </button>
               <button
                 onClick={() => onClose(false)}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  onClose(false);
+                }}
                 className="btn-modal btn-gray"
               >
                 <i className="fas fa-times"></i>
@@ -9049,6 +9222,10 @@ const CookingModeModal = ({
             <div className="flex flex-wrap gap-3 mb-6">
               <button
                 onClick={handleReadStep}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  handleReadStep();
+                }}
                 className={`btn-modal ${isReading ? "btn-red" : "btn-blue"}`}
               >
                 <i
@@ -9058,6 +9235,16 @@ const CookingModeModal = ({
               </button>
               <button
                 onClick={() => {
+                  if (window.speechSynthesis.paused) {
+                    window.speechSynthesis.resume();
+                    setIsTTSPaused(false);
+                  } else if (window.speechSynthesis.speaking) {
+                    window.speechSynthesis.pause();
+                    setIsTTSPaused(true);
+                  }
+                }}
+                onTouchStart={(e) => {
+                  e.preventDefault();
                   if (window.speechSynthesis.paused) {
                     window.speechSynthesis.resume();
                     setIsTTSPaused(false);
@@ -9076,29 +9263,67 @@ const CookingModeModal = ({
               </button>
               <button
                 onClick={() => setAutoReadEnabled(!autoReadEnabled)}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  setAutoReadEnabled(!autoReadEnabled);
+                }}
                 className={`btn-modal ${autoReadEnabled ? "btn-green" : "btn-gray"}`}
               >
                 <i className="fas fa-forward mr-2"></i>
                 Auto-Advance {autoReadEnabled ? "ON" : "OFF"}
               </button>
 
-              {/* Show step-specific timer button if time detected */}
-              {currentStepTime.found && (
-                <button
-                  onClick={() =>
-                    handleStepTimer(
-                      currentStepTime.seconds,
-                      currentStepTime.displayText,
-                    )
-                  }
-                  className="btn-modal btn-green"
-                  disabled={activeStepTimer !== null}
-                >
-                  <i className="fas fa-hourglass-half mr-1"></i>
-                  {currentStepTime.displayText}
-                  {activeStepTimer !== null && " (Running)"}
-                </button>
-              )}
+              {/* Show step-specific timer buttons if times detected */}
+              {currentStepTime.found &&
+                currentStepTime.timers &&
+                currentStepTime.timers.map((timer, index) => {
+                  const isCurrentTimer = index === currentTimerIndex;
+                  const isActiveTimer =
+                    activeStepTimer !== null &&
+                    activeStepTimer.timerIndex === index;
+                  const isPastTimer = index < currentTimerIndex;
+
+                  return (
+                    <button
+                      key={index}
+                      onClick={() =>
+                        handleStepTimer(timer.seconds, timer.displayText, index)
+                      }
+                      onTouchStart={(e) => {
+                        e.preventDefault();
+                        if (!activeStepTimer && isCurrentTimer) {
+                          handleStepTimer(
+                            timer.seconds,
+                            timer.displayText,
+                            index,
+                          );
+                        }
+                      }}
+                      className={`btn-modal ${
+                        isPastTimer
+                          ? "btn-gray opacity-50 cursor-not-allowed"
+                          : isActiveTimer
+                            ? "btn-orange"
+                            : isCurrentTimer
+                              ? "btn-green"
+                              : "btn-gray opacity-50 cursor-not-allowed"
+                      }`}
+                      disabled={!isCurrentTimer || activeStepTimer !== null}
+                      title={
+                        isPastTimer
+                          ? "Timer completed"
+                          : !isCurrentTimer
+                            ? "Complete previous timer first"
+                            : ""
+                      }
+                    >
+                      <i className="fas fa-hourglass-half mr-1"></i>
+                      {isPastTimer && "✓ "}
+                      Timer {index + 1}: {timer.displayText}
+                      {isActiveTimer && " (Running)"}
+                    </button>
+                  );
+                })}
 
               {/* Show waiting indicator */}
               {waitingForTimer && (
@@ -9131,6 +9356,12 @@ const CookingModeModal = ({
           <div className="flex justify-between items-center">
             <button
               onClick={() => setCurrentStep(Math.max(0, currentStep - 1))}
+              onTouchStart={(e) => {
+                e.preventDefault();
+                if (currentStep > 0) {
+                  setCurrentStep(Math.max(0, currentStep - 1));
+                }
+              }}
               disabled={currentStep === 0}
               className="btn-modal btn-gray"
             >
@@ -9140,6 +9371,10 @@ const CookingModeModal = ({
 
             <button
               onClick={handleStepComplete}
+              onTouchStart={(e) => {
+                e.preventDefault();
+                handleStepComplete();
+              }}
               className="btn-modal btn-green"
             >
               <i className="fas fa-check mr-2"></i>
@@ -9147,13 +9382,56 @@ const CookingModeModal = ({
             </button>
 
             {currentStep === totalSteps - 1 && (
-              <button onClick={handleComplete} className="btn-modal btn-blue">
+              <button
+                onClick={handleComplete}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  handleComplete();
+                }}
+                className="btn-modal btn-blue"
+              >
                 <i className="fas fa-flag-checkered mr-2"></i>
                 Finish
               </button>
             )}
           </div>
         </div>
+
+        {/* Timer Alert Modal */}
+        {showTimerAlert && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-2xl max-w-md w-full p-6 animate-bounce">
+              <div className="text-center">
+                <div className="mb-4">
+                  <i className="fas fa-bell text-6xl text-orange-500 animate-pulse"></i>
+                </div>
+                <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">
+                  Timer Complete!
+                </h2>
+                <p className="text-gray-600 dark:text-gray-300 mb-6">
+                  {currentStepTime.timers &&
+                  currentStepTime.timers.length > currentTimerIndex + 1
+                    ? `Timer ${currentTimerIndex + 1} of ${currentStepTime.timers.length} complete. Ready for next timer?`
+                    : "All timers complete!"}
+                </p>
+                <button
+                  onClick={handleDismissTimer}
+                  onTouchStart={(e) => {
+                    e.preventDefault();
+                    handleDismissTimer();
+                  }}
+                  className="btn-modal btn-green w-full text-lg"
+                >
+                  <i className="fas fa-check-circle mr-2"></i>
+                  {currentStepTime.timers &&
+                  currentStepTime.timers.length > currentTimerIndex + 1
+                    ? "Continue to Next Timer"
+                    : "Continue"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

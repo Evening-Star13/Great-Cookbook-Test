@@ -115,6 +115,10 @@ body.modal-open {
     color 0.2s ease;
   border: 1px solid transparent;
   white-space: nowrap;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .btn-header:hover {
   background-color: #e5e7eb;
@@ -218,10 +222,17 @@ body.modal-open {
   pointer-events: all;
   position: relative;
   z-index: 10;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .btn-modal:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+.btn-modal:active:not(:disabled) {
+  transform: scale(0.95);
 }
 .btn-green {
   background-color: #0ca139;
@@ -229,6 +240,13 @@ body.modal-open {
 }
 .btn-green:hover:not(:disabled) {
   background-color: #0c8f33;
+}
+.btn-orange {
+  background-color: #f97316;
+  color: white;
+}
+.btn-orange:hover:not(:disabled) {
+  background-color: #ea580c;
 }
 .btn-gray {
   background-color: #e5e7eb;
@@ -719,12 +737,20 @@ body.modal-open {
   display: flex;
   align-items: center;
   gap: 6px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .page-nav-btn:hover {
   background: #1403afe1;
   transform: translateY(-3px);
   box-shadow: 0 8px 8px #1503afad;
+}
+
+.page-nav-btn:active {
+  transform: translateY(-1px);
 }
 
 /* .nav-arrow {
@@ -990,12 +1016,20 @@ body.modal-open {
   pointer-events: all;
   position: relative;
   z-index: 10;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .add-recipe-btn-large:hover {
   background: #1503af;
   transform: translateY(-3px);
   box-shadow: 0 8px 8px #1503afad;
+}
+
+.add-recipe-btn-large:active {
+  transform: translateY(-1px);
 }
 
 .cover-edit-btn {
