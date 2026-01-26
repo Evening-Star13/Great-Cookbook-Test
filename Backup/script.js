@@ -2,7 +2,7 @@
 
 // --- Database and Utility Functions ---
 const DB_NAME = "RecipeManagerDB";
-const DB_VERSION = 2; // Incremented for new stores
+const DB_VERSION = 3; // Incremented for new features
 const STORE_NAMES = {
   RECIPES: "recipes",
   MEAL_PLAN: "mealPlan",
@@ -12,6 +12,11 @@ const STORE_NAMES = {
   COLLECTIONS: "collections",
   ANALYTICS: "analytics",
   COOKING_SESSIONS: "cookingSessions",
+  DRAFTS: "drafts",
+  RECIPE_VERSIONS: "recipeVersions",
+  NUTRITION_GOALS: "nutritionGoals",
+  INGREDIENT_PRICES: "ingredientPrices",
+  SUBSTITUTIONS: "substitutions",
 };
 const LOCAL_STORAGE_KEYS = {
   RECIPES: "recipes",
@@ -23,6 +28,12 @@ const LOCAL_STORAGE_KEYS = {
   COLLECTIONS: "collections",
   ANALYTICS: "analytics",
   COOKING_SESSIONS: "cookingSessions",
+  DRAFTS: "drafts",
+  RECIPE_VERSIONS: "recipeVersions",
+  NUTRITION_GOALS: "nutritionGoals",
+  INGREDIENT_PRICES: "ingredientPrices",
+  SUBSTITUTIONS: "substitutions",
+  HIGH_CONTRAST: "highContrastMode",
 };
 
 let db = null;
@@ -661,6 +672,558 @@ const capitalizeFirstLetter = (string) => {
   return string.charAt(0).toUpperCase() + string.slice(1);
 };
 
+// ===== FEATURE 10: AUTO-SAVE DRAFTS =====
+const useDraftSaver = (formData, key, delay = 2000) => {
+  const timeoutRef = useRef(null);
+
+  useEffect(() => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
+
+    timeoutRef.current = setTimeout(() => {
+      try {
+        localStorage.setItem(`draft_${key}`, JSON.stringify(formData));
+      } catch (error) {
+        console.error("Failed to save draft:", error);
+      }
+    }, delay);
+
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    };
+  }, [formData, key, delay]);
+};
+
+const loadDraft = (key) => {
+  try {
+    const draft = localStorage.getItem(`draft_${key}`);
+    return draft ? JSON.parse(draft) : null;
+  } catch (error) {
+    console.error("Failed to load draft:", error);
+    return null;
+  }
+};
+
+const clearDraft = (key) => {
+  try {
+    localStorage.removeItem(`draft_${key}`);
+  } catch (error) {
+    console.error("Failed to clear draft:", error);
+  }
+};
+
+// ===== FEATURE 11: RECIPE SUGGESTIONS =====
+const getRecipeSuggestions = (recipes, inventory, limit = 5) => {
+  return recipes
+    .map((recipe) => {
+      if (!recipe || !Array.isArray(recipe.ingredients)) return null;
+
+      const ingredientMatches = recipe.ingredients.filter((ing) => {
+        const normalized = normalizeIngredient(ing).toLowerCase();
+        return inventory.some(
+          (item) =>
+            item.name.toLowerCase().includes(normalized) ||
+            normalized.includes(item.name.toLowerCase()),
+        );
+      });
+
+      const matchPercent =
+        recipe.ingredients.length > 0
+          ? (ingredientMatches.length / recipe.ingredients.length) * 100
+          : 0;
+
+      return {
+        recipe,
+        matchPercent,
+        matchingCount: ingredientMatches.length,
+        missingCount: recipe.ingredients.length - ingredientMatches.length,
+      };
+    })
+    .filter((item) => item && item.matchPercent > 0)
+    .sort((a, b) => b.matchPercent - a.matchPercent)
+    .slice(0, limit);
+};
+
+// ===== FEATURE 12: NUTRITIONAL CALCULATOR =====
+const NUTRITION_DATABASE = {
+  // Common ingredients with nutrition per 100g
+  "ground beef": { calories: 250, protein: 26, carbs: 0, fat: 17 },
+  "chicken breast": { calories: 165, protein: 31, carbs: 0, fat: 3.6 },
+  "olive oil": { calories: 884, protein: 0, carbs: 0, fat: 100 },
+  tomato: { calories: 18, protein: 0.9, carbs: 3.9, fat: 0.2 },
+  onion: { calories: 40, protein: 1.1, carbs: 9.3, fat: 0.1 },
+  garlic: { calories: 149, protein: 6.4, carbs: 33, fat: 0.5 },
+  pasta: { calories: 371, protein: 13, carbs: 75, fat: 1.5 },
+  rice: { calories: 130, protein: 2.7, carbs: 28, fat: 0.3 },
+  egg: { calories: 155, protein: 13, carbs: 1.1, fat: 11 },
+  milk: { calories: 61, protein: 3.2, carbs: 4.8, fat: 3.3 },
+  cheese: { calories: 402, protein: 25, carbs: 1.3, fat: 33 },
+  bread: { calories: 265, protein: 9, carbs: 49, fat: 3.2 },
+  butter: { calories: 717, protein: 0.9, carbs: 0.1, fat: 81 },
+  sugar: { calories: 387, protein: 0, carbs: 100, fat: 0 },
+  flour: { calories: 364, protein: 10, carbs: 76, fat: 1 },
+};
+
+const calculateNutrition = (ingredients, servings = 1) => {
+  let totalCalories = 0;
+  let totalProtein = 0;
+  let totalCarbs = 0;
+  let totalFat = 0;
+
+  ingredients.forEach((ing) => {
+    const normalized = normalizeIngredient(ing).toLowerCase();
+    const { quantity, unit } = parseIngredient(ing);
+
+    // Find matching ingredient in database
+    const nutritionData = Object.keys(NUTRITION_DATABASE).find((key) =>
+      normalized.includes(key),
+    );
+
+    if (nutritionData && quantity) {
+      const nutrition = NUTRITION_DATABASE[nutritionData];
+      // Rough conversion: assume 1 cup = 240g, 1 tbsp = 15g, 1 tsp = 5g
+      let grams = quantity;
+      if (unit === "cup" || unit === "cups") grams = quantity * 240;
+      else if (unit === "tbsp" || unit === "tablespoon") grams = quantity * 15;
+      else if (unit === "tsp" || unit === "teaspoon") grams = quantity * 5;
+      else if (unit === "lb" || unit === "pound") grams = quantity * 453.6;
+      else if (unit === "oz" || unit === "ounce") grams = quantity * 28.35;
+
+      const factor = grams / 100;
+      totalCalories += nutrition.calories * factor;
+      totalProtein += nutrition.protein * factor;
+      totalCarbs += nutrition.carbs * factor;
+      totalFat += nutrition.fat * factor;
+    }
+  });
+
+  return {
+    calories: Math.round(totalCalories / servings),
+    protein: Math.round(totalProtein / servings),
+    carbs: Math.round(totalCarbs / servings),
+    fat: Math.round(totalFat / servings),
+  };
+};
+
+// ===== FEATURE 13: INGREDIENT SUBSTITUTION =====
+const INGREDIENT_SUBSTITUTIONS = {
+  butter: ["coconut oil", "margarine", "olive oil", "applesauce (for baking)"],
+  milk: ["almond milk", "soy milk", "oat milk", "coconut milk"],
+  egg: [
+    "flax egg (1 tbsp ground flax + 3 tbsp water)",
+    "chia egg",
+    "applesauce (1/4 cup per egg)",
+    "banana (1/4 cup mashed per egg)",
+  ],
+  sugar: [
+    "honey (3/4 cup per 1 cup sugar)",
+    "maple syrup",
+    "stevia",
+    "coconut sugar",
+  ],
+  "all-purpose flour": [
+    "whole wheat flour",
+    "almond flour",
+    "coconut flour (use less)",
+    "oat flour",
+  ],
+  "heavy cream": ["coconut cream", "cashew cream", "half and half + butter"],
+  "sour cream": ["greek yogurt", "coconut yogurt", "cashew cream"],
+  breadcrumbs: ["crushed crackers", "panko", "crushed cornflakes", "oats"],
+  "parmesan cheese": ["nutritional yeast", "pecorino romano", "asiago"],
+  "ground beef": ["ground turkey", "ground chicken", "lentils", "mushrooms"],
+  "chicken breast": ["turkey breast", "pork tenderloin", "tofu", "tempeh"],
+  "white rice": ["brown rice", "quinoa", "cauliflower rice"],
+  pasta: ["zucchini noodles", "whole wheat pasta", "rice noodles"],
+  "soy sauce": ["tamari", "coconut aminos", "worcestershire sauce"],
+  vinegar: ["lemon juice", "lime juice"],
+  honey: ["maple syrup", "agave nectar"],
+  "baking powder": [
+    "baking soda + cream of tartar (1/4 tsp soda + 1/2 tsp cream per 1 tsp powder)",
+  ],
+  buttermilk: ["milk + lemon juice (1 tbsp lemon per cup milk)"],
+};
+
+const findSubstitutions = (ingredient) => {
+  const normalized = normalizeIngredient(ingredient).toLowerCase();
+
+  for (const [key, substitutes] of Object.entries(INGREDIENT_SUBSTITUTIONS)) {
+    if (normalized.includes(key)) {
+      return { ingredient: key, substitutes };
+    }
+  }
+
+  return null;
+};
+
+// ===== FEATURE 6: SWIPE GESTURES =====
+const useSwipeGesture = (onSwipeLeft, onSwipeRight, threshold = 50) => {
+  const touchStartX = useRef(0);
+  const touchEndX = useRef(0);
+  const touchStartY = useRef(0);
+  const touchEndY = useRef(0);
+  const isSwiping = useRef(false);
+
+  const handleTouchStart = useCallback((e) => {
+    touchStartX.current = e.touches[0].clientX;
+    touchStartY.current = e.touches[0].clientY;
+    isSwiping.current = true;
+  }, []);
+
+  const handleTouchMove = useCallback((e) => {
+    if (!isSwiping.current) return;
+    touchEndX.current = e.touches[0].clientX;
+    touchEndY.current = e.touches[0].clientY;
+  }, []);
+
+  const handleTouchEnd = useCallback(() => {
+    if (!isSwiping.current) return;
+
+    const deltaX = touchStartX.current - touchEndX.current;
+    const deltaY = Math.abs(touchStartY.current - touchEndY.current);
+
+    // Only trigger if horizontal swipe is dominant
+    if (Math.abs(deltaX) > deltaY && Math.abs(deltaX) > threshold) {
+      if (deltaX > 0) {
+        onSwipeLeft?.();
+      } else {
+        onSwipeRight?.();
+      }
+    }
+
+    isSwiping.current = false;
+  }, [onSwipeLeft, onSwipeRight, threshold]);
+
+  return { handleTouchStart, handleTouchMove, handleTouchEnd };
+};
+
+// ===== FEATURE 8: PULL TO REFRESH =====
+const usePullToRefresh = (onRefresh, threshold = 80) => {
+  const [isPulling, setIsPulling] = useState(false);
+  const [pullDistance, setPullDistance] = useState(0);
+  const startY = useRef(0);
+  const containerRef = useRef(null);
+
+  const handleTouchStart = useCallback((e) => {
+    if (containerRef.current?.scrollTop === 0) {
+      startY.current = e.touches[0].clientY;
+    }
+  }, []);
+
+  const handleTouchMove = useCallback(
+    (e) => {
+      if (startY.current === 0 || containerRef.current?.scrollTop > 0) return;
+
+      const currentY = e.touches[0].clientY;
+      const distance = currentY - startY.current;
+
+      if (distance > 0) {
+        setPullDistance(Math.min(distance, threshold * 1.5));
+        setIsPulling(distance > threshold);
+      }
+    },
+    [threshold],
+  );
+
+  const handleTouchEnd = useCallback(async () => {
+    if (isPulling) {
+      await onRefresh?.();
+    }
+    setIsPulling(false);
+    setPullDistance(0);
+    startY.current = 0;
+  }, [isPulling, onRefresh]);
+
+  return {
+    isPulling,
+    pullDistance,
+    containerRef,
+    handleTouchStart,
+    handleTouchMove,
+    handleTouchEnd,
+  };
+};
+
+// ===== FEATURE 14: SMART SEARCH WITH FUZZY MATCHING =====
+const fuzzyMatch = (text, query) => {
+  const textLower = text.toLowerCase();
+  const queryLower = query.toLowerCase();
+
+  // Exact match
+  if (textLower.includes(queryLower)) return 100;
+
+  // Calculate fuzzy score
+  let score = 0;
+  let queryIndex = 0;
+
+  for (let i = 0; i < textLower.length && queryIndex < queryLower.length; i++) {
+    if (textLower[i] === queryLower[queryIndex]) {
+      score += 1;
+      queryIndex++;
+    }
+  }
+
+  return queryIndex === queryLower.length
+    ? (score / queryLower.length) * 50
+    : 0;
+};
+
+const smartSearch = (recipes, query, filters = {}) => {
+  if (!query && !Object.keys(filters).length) return recipes;
+
+  return recipes
+    .map((recipe) => {
+      let score = 0;
+
+      // Text matching
+      if (query) {
+        score += fuzzyMatch(recipe.name || "", query);
+        score += fuzzyMatch(recipe.description || "", query) * 0.5;
+        score += (recipe.tags || []).reduce(
+          (sum, tag) => sum + fuzzyMatch(tag, query) * 0.3,
+          0,
+        );
+        score += (recipe.ingredients || []).reduce(
+          (sum, ing) => sum + fuzzyMatch(ing, query) * 0.2,
+          0,
+        );
+      } else {
+        score = 100; // No query means all recipes match
+      }
+
+      // Filter matching
+      if (filters.type && recipe.type !== filters.type) return null;
+      if (filters.cuisine && recipe.cuisine !== filters.cuisine) return null;
+      if (filters.maxTime) {
+        const totalTime = (recipe.prepTime || 0) + (recipe.cookTime || 0);
+        if (totalTime > filters.maxTime) return null;
+      }
+      if (filters.maxCalories && recipe.calories > filters.maxCalories)
+        return null;
+      if (
+        filters.dietaryType &&
+        !(recipe.dietaryTypes || []).includes(filters.dietaryType)
+      )
+        return null;
+      if (filters.hasIngredients) {
+        const hasAll = filters.hasIngredients.every((requiredIng) =>
+          (recipe.ingredients || []).some((ing) =>
+            normalizeIngredient(ing)
+              .toLowerCase()
+              .includes(requiredIng.toLowerCase()),
+          ),
+        );
+        if (!hasAll) return null;
+      }
+
+      return { recipe, score };
+    })
+    .filter((item) => item && item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map((item) => item.recipe);
+};
+
+// ===== FEATURE 19: RECIPE VERSIONING =====
+const saveRecipeVersion = async (recipe, changeDescription = "Updated") => {
+  const version = {
+    id: Date.now().toString(),
+    recipeId: recipe.id,
+    recipeName: recipe.name,
+    data: { ...recipe },
+    changeDescription,
+    timestamp: new Date().toISOString(),
+  };
+
+  try {
+    await addItem(STORE_NAMES.RECIPE_VERSIONS, version);
+    return version;
+  } catch (error) {
+    console.error("Failed to save recipe version:", error);
+  }
+};
+
+const getRecipeVersions = async (recipeId) => {
+  try {
+    const allVersions = await getAllItems(STORE_NAMES.RECIPE_VERSIONS);
+    return allVersions
+      .filter((v) => v.recipeId === recipeId)
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  } catch (error) {
+    console.error("Failed to get recipe versions:", error);
+    return [];
+  }
+};
+
+// ===== FEATURE 22: RECIPE COST TRACKER =====
+const calculateRecipeCost = (recipe, priceDatabase = {}) => {
+  let totalCost = 0;
+  const itemizedCosts = [];
+
+  (recipe.ingredients || []).forEach((ing) => {
+    const normalized = normalizeIngredient(ing);
+    const { quantity, unit } = parseIngredient(ing);
+
+    const priceData = priceDatabase[normalized];
+    if (priceData && quantity) {
+      let cost = priceData.pricePerUnit * quantity;
+      totalCost += cost;
+      itemizedCosts.push({
+        ingredient: ing,
+        cost: cost.toFixed(2),
+      });
+    }
+  });
+
+  const costPerServing =
+    recipe.servings > 0 ? totalCost / recipe.servings : totalCost;
+
+  return {
+    totalCost: totalCost.toFixed(2),
+    costPerServing: costPerServing.toFixed(2),
+    itemizedCosts,
+  };
+};
+
+// ===== FEATURE 28: UNDO/REDO SYSTEM =====
+class ActionHistory {
+  constructor(maxSize = 50) {
+    this.history = [];
+    this.currentIndex = -1;
+    this.maxSize = maxSize;
+  }
+
+  push(action) {
+    // Remove any actions after current index
+    this.history = this.history.slice(0, this.currentIndex + 1);
+
+    this.history.push(action);
+
+    // Keep history under max size
+    if (this.history.length > this.maxSize) {
+      this.history.shift();
+    } else {
+      this.currentIndex++;
+    }
+  }
+
+  undo() {
+    if (this.canUndo()) {
+      const action = this.history[this.currentIndex];
+      this.currentIndex--;
+      return action;
+    }
+    return null;
+  }
+
+  redo() {
+    if (this.canRedo()) {
+      this.currentIndex++;
+      const action = this.history[this.currentIndex];
+      return action;
+    }
+    return null;
+  }
+
+  canUndo() {
+    return this.currentIndex >= 0;
+  }
+
+  canRedo() {
+    return this.currentIndex < this.history.length - 1;
+  }
+
+  clear() {
+    this.history = [];
+    this.currentIndex = -1;
+  }
+}
+
+const useUndoRedo = () => {
+  const historyRef = useRef(new ActionHistory());
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
+  const recordAction = useCallback((action) => {
+    historyRef.current.push(action);
+    setCanUndo(historyRef.current.canUndo());
+    setCanRedo(historyRef.current.canRedo());
+  }, []);
+
+  const undo = useCallback(() => {
+    const action = historyRef.current.undo();
+    setCanUndo(historyRef.current.canUndo());
+    setCanRedo(historyRef.current.canRedo());
+    return action;
+  }, []);
+
+  const redo = useCallback(() => {
+    const action = historyRef.current.redo();
+    setCanUndo(historyRef.current.canUndo());
+    setCanRedo(historyRef.current.canRedo());
+    return action;
+  }, []);
+
+  return { recordAction, undo, redo, canUndo, canRedo };
+};
+
+// ===== FEATURE 27: ERROR BOUNDARY =====
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null, errorInfo: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error("Error caught by boundary:", error, errorInfo);
+    this.setState({ error, errorInfo });
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-gray-900 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-8 max-w-md text-center">
+            <i className="fas fa-exclamation-triangle text-6xl text-red-500 mb-4"></i>
+            <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">
+              Oops! Something went wrong
+            </h2>
+            <p className="text-gray-600 dark:text-gray-400 mb-4">
+              Don't worry, your recipes are safe. Please refresh the page to
+              continue.
+            </p>
+            <button
+              onClick={() => window.location.reload()}
+              className="btn-modal btn-green"
+            >
+              <i className="fas fa-redo mr-2"></i>
+              Refresh Page
+            </button>
+            {this.state.error && (
+              <details className="mt-4 text-left">
+                <summary className="cursor-pointer text-sm text-gray-500">
+                  Error details
+                </summary>
+                <pre className="text-xs bg-gray-100 dark:bg-gray-900 p-2 rounded mt-2 overflow-auto">
+                  {this.state.error.toString()}
+                </pre>
+              </details>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 const SAMPLE_RECIPES = [
   {
     id: "1",
@@ -1218,10 +1781,37 @@ const detectIngredientCategory = (itemName) => {
 
 // --- QR CODE GENERATOR ---
 const generateQRCode = async (data) => {
-  // Simple QR code generator using QR Server API (no account needed)
-  const qrData = typeof data === "string" ? data : JSON.stringify(data);
-  const encoded = encodeURIComponent(qrData);
-  return `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encoded}`;
+  // Generate simple scannable text with recipe info
+  const r = typeof data === "string" ? JSON.parse(data) : data;
+
+  console.log("QR Code - Full recipe object keys:", Object.keys(r));
+  // Ensure arrays exist
+  const ingredients = Array.isArray(r.ingredients) ? r.ingredients : [];
+  const directions = Array.isArray(r.directions) ? r.directions : [];
+  const tips = Array.isArray(r.tipsAndTricks) ? r.tipsAndTricks : [];
+
+  console.log("QR Code - Ingredients array:", ingredients);
+  console.log("QR Code - Directions array:", directions);
+
+  // Create simple text format that's easy to scan
+  const recipeText = `${r.name || "Recipe"}
+
+${r.type || ""} ${r.cuisine ? "• " + r.cuisine : ""}
+${r.description || ""}
+
+Prep: ${r.prepTime || 0}m | Cook: ${r.cookTime || 0}m | Serves: ${r.servings || 4}
+
+INGREDIENTS:
+${ingredients.map((i, idx) => `${idx + 1}. ${i}`).join("\n")}
+
+DIRECTIONS:
+${directions.map((d, idx) => `${idx + 1}. ${d}`).join("\n")}${tips.length > 0 ? `\n\n💡 TIPS: ${tips.join(". ")}` : ""}`;
+
+  console.log("QR Code - Final text:", recipeText);
+
+  // Generate QR code with plain text
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(recipeText)}`;
+  return qrUrl;
 };
 
 // --- ANALYTICS UTILITIES ---
@@ -1602,8 +2192,87 @@ const Toast = ({ message, type, onClose }) => {
   return (
     <div
       className={`p-3 rounded-lg shadow-lg text-white text-sm ${bgColor} animate-fade-in-out`}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
     >
       {message}
+    </div>
+  );
+};
+
+// ===== FEATURE 1: LOADING SKELETON COMPONENT =====
+const SkeletonLoader = ({ type = "card", count = 3 }) => {
+  const skeletons = Array.from({ length: count }, (_, i) => i);
+
+  if (type === "card") {
+    return (
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {skeletons.map((i) => (
+          <div key={i} className="skeleton-card">
+            <div className="skeleton skeleton-line w-3/4 mb-3"></div>
+            <div className="skeleton skeleton-line w-full mb-2"></div>
+            <div className="skeleton skeleton-line w-5/6 mb-4"></div>
+            <div className="flex gap-2 mb-3">
+              <div className="skeleton skeleton-circle w-8 h-8"></div>
+              <div className="skeleton skeleton-circle w-8 h-8"></div>
+            </div>
+            <div className="skeleton skeleton-line w-2/3"></div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (type === "list") {
+    return (
+      <div className="space-y-2">
+        {skeletons.map((i) => (
+          <div key={i} className="skeleton skeleton-line w-full h-12"></div>
+        ))}
+      </div>
+    );
+  }
+
+  return <div className="skeleton skeleton-line w-full h-48"></div>;
+};
+
+// ===== FEATURE 26: EMPTY STATE COMPONENT =====
+const EmptyState = ({ icon, title, description, actionLabel, onAction }) => {
+  return (
+    <div className="empty-state">
+      <i className={`fas ${icon} empty-state-icon`}></i>
+      <h3 className="empty-state-title">{title}</h3>
+      <p className="empty-state-description">{description}</p>
+      {actionLabel && onAction && (
+        <button onClick={onAction} className="btn-modal btn-green mt-4">
+          <i className="fas fa-plus mr-2"></i>
+          {actionLabel}
+        </button>
+      )}
+    </div>
+  );
+};
+
+// ===== FEATURE 3: IMAGE PLACEHOLDER COMPONENT =====
+const ImagePlaceholder = ({ recipeName, index = 0 }) => {
+  const gradients = [
+    "gradient-placeholder-1",
+    "gradient-placeholder-2",
+    "gradient-placeholder-3",
+    "gradient-placeholder-4",
+    "gradient-placeholder-5",
+    "gradient-placeholder-6",
+  ];
+
+  const gradientClass = gradients[index % gradients.length];
+  const initial = (recipeName || "R").charAt(0).toUpperCase();
+
+  return (
+    <div
+      className={`gradient-placeholder ${gradientClass} w-full h-full rounded-lg`}
+    >
+      <span className="text-6xl font-bold opacity-80">{initial}</span>
     </div>
   );
 };
@@ -1804,6 +2473,9 @@ const App = () => {
       directions: r.directions || [],
       tipsAndTricks: r.tipsAndTricks || [],
       yield: r.yield || "",
+      versions: [], // FEATURE 19: Recipe versioning
+      photos: [], // FEATURE 23: Photo gallery
+      videos: [], // FEATURE 24: Video clips
     })),
     addToast,
   );
@@ -1831,22 +2503,60 @@ const App = () => {
   const [cookingSessions, setCookingSessions, isLoadingSessions] =
     usePersistentStorage(STORE_NAMES.COOKING_SESSIONS, [], addToast);
 
+  // FEATURE 25: Nutrition Goals
+  const [nutritionGoals, setNutritionGoals, isLoadingGoals] =
+    usePersistentStorage(
+      STORE_NAMES.NUTRITION_GOALS,
+      { dailyCalories: 2000, dailyProtein: 50, dailyCarbs: 300, dailyFat: 65 },
+      addToast,
+    );
+
+  // FEATURE 22: Ingredient Prices
+  const [ingredientPrices, setIngredientPrices, isLoadingPrices] =
+    usePersistentStorage(STORE_NAMES.INGREDIENT_PRICES, {}, addToast);
+
   const [isDarkMode, setIsDarkMode] = useState(() => {
     return (
       typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-color-scheme: dark)").matches
     );
   });
+
+  // FEATURE 17: High Contrast Mode
+  const [isHighContrast, setIsHighContrast] = useState(() => {
+    return localStorage.getItem(LOCAL_STORAGE_KEYS.HIGH_CONTRAST) === "true";
+  });
+
   const [showAddRecipeModal, setShowAddRecipeModal] = useState(false);
   const [showRecipeDetails, setShowRecipeDetails] = useState(null);
   const [showMealPlanModal, setShowMealPlanModal] = useState(false);
   const [showShoppingListModal, setShowShoppingListModal] = useState(false);
   const [showInventoryModal, setShowInventoryModal] = useState(false);
   const [showCollectionsModal, setShowCollectionsModal] = useState(false);
+  const [collectionsBulkMode, setCollectionsBulkMode] = useState(false);
   const [showAnalyticsModal, setShowAnalyticsModal] = useState(false);
   const [showCookingMode, setShowCookingMode] = useState(null);
   const [editingRecipe, setEditingRecipe] = useState(null);
   const [displayUnitSystem, setDisplayUnitSystem] = useState("imperial");
+
+  // FEATURE 29: Bulk Operations
+  const [selectedRecipes, setSelectedRecipes] = useState([]);
+  const [isBulkMode, setIsBulkMode] = useState(false);
+
+  // FEATURE 11: Recipe Suggestions
+  const [showSuggestionsModal, setShowSuggestionsModal] = useState(false);
+
+  // FEATURE 21: Meal Prep Mode
+  const [showMealPrepModal, setShowMealPrepModal] = useState(false);
+
+  // FEATURE 25: Nutrition Goals Dashboard
+  const [showNutritionGoalsModal, setShowNutritionGoalsModal] = useState(false);
+
+  // FEATURE 20: Cloud Sync
+  const [showCloudSyncModal, setShowCloudSyncModal] = useState(false);
+
+  // FEATURE 28: Undo/Redo System
+  const { recordAction, undo, redo, canUndo, canRedo } = useUndoRedo();
 
   // Smart features state
   const { timers, addTimer, toggleTimer, removeTimer, resetTimer } =
@@ -1859,7 +2569,21 @@ const App = () => {
     isLoadingInventory ||
     isLoadingRatings ||
     isLoadingCollections ||
-    isLoadingSessions;
+    isLoadingSessions ||
+    isLoadingGoals ||
+    isLoadingPrices;
+
+  // FEATURE 17: High Contrast Mode Toggle
+  useEffect(() => {
+    const root = window.document.documentElement;
+    if (isHighContrast) {
+      root.classList.add("high-contrast-mode");
+      localStorage.setItem(LOCAL_STORAGE_KEYS.HIGH_CONTRAST, "true");
+    } else {
+      root.classList.remove("high-contrast-mode");
+      localStorage.setItem(LOCAL_STORAGE_KEYS.HIGH_CONTRAST, "false");
+    }
+  }, [isHighContrast]);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -1876,6 +2600,54 @@ const App = () => {
     return () => mediaQuery.removeEventListener("change", handleChange);
   }, [isDarkMode]);
 
+  // FEATURE 15: Keyboard Navigation
+  useEffect(() => {
+    const handleKeyPress = (e) => {
+      // Ctrl/Cmd + Z for undo
+      if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        const action = undo();
+        if (action) {
+          executeUndoAction(action);
+        }
+      }
+
+      // Ctrl/Cmd + Shift + Z for redo
+      if ((e.ctrlKey || e.metaKey) && e.key === "z" && e.shiftKey) {
+        e.preventDefault();
+        const action = redo();
+        if (action) {
+          executeRedoAction(action);
+        }
+      }
+
+      // Ctrl/Cmd + N for new recipe
+      if ((e.ctrlKey || e.metaKey) && e.key === "n") {
+        e.preventDefault();
+        setEditingRecipe(null);
+        setShowAddRecipeModal(true);
+      }
+
+      // Escape to close modals
+      if (e.key === "Escape") {
+        setShowAddRecipeModal(false);
+        setShowRecipeDetails(null);
+        setShowMealPlanModal(false);
+        setShowShoppingListModal(false);
+        setShowInventoryModal(false);
+        setShowCollectionsModal(false);
+        setShowAnalyticsModal(false);
+        setShowSuggestionsModal(false);
+        setShowMealPrepModal(false);
+        setShowNutritionGoalsModal(false);
+        setShowCloudSyncModal(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyPress);
+    return () => window.removeEventListener("keydown", handleKeyPress);
+  }, [undo, redo]);
+
   useEffect(() => {
     const body = document.body;
     const isModalOpen =
@@ -1886,7 +2658,11 @@ const App = () => {
       showInventoryModal ||
       showCollectionsModal ||
       showAnalyticsModal ||
-      !!showCookingMode;
+      !!showCookingMode ||
+      showSuggestionsModal ||
+      showMealPrepModal ||
+      showNutritionGoalsModal ||
+      showCloudSyncModal;
 
     if (isModalOpen) {
       body.classList.add("modal-open");
@@ -1903,7 +2679,51 @@ const App = () => {
     showCollectionsModal,
     showAnalyticsModal,
     showCookingMode,
+    showSuggestionsModal,
+    showMealPrepModal,
+    showNutritionGoalsModal,
   ]);
+
+  // FEATURE 28: Execute Undo/Redo Actions
+  const executeUndoAction = useCallback(
+    (action) => {
+      if (action.type === "DELETE_RECIPE") {
+        setRecipes((prev) => [...prev, action.data]);
+        addToast("Recipe restored", "success");
+      } else if (action.type === "ADD_RECIPE") {
+        setRecipes((prev) => prev.filter((r) => r.id !== action.data.id));
+        addToast("Recipe addition undone", "info");
+      } else if (action.type === "UPDATE_RECIPE") {
+        setRecipes((prev) =>
+          prev.map((r) =>
+            r.id === action.data.oldData.id ? action.data.oldData : r,
+          ),
+        );
+        addToast("Recipe changes undone", "info");
+      }
+    },
+    [setRecipes, addToast],
+  );
+
+  const executeRedoAction = useCallback(
+    (action) => {
+      if (action.type === "DELETE_RECIPE") {
+        setRecipes((prev) => prev.filter((r) => r.id !== action.data.id));
+        addToast("Recipe deleted again", "success");
+      } else if (action.type === "ADD_RECIPE") {
+        setRecipes((prev) => [...prev, action.data]);
+        addToast("Recipe re-added", "success");
+      } else if (action.type === "UPDATE_RECIPE") {
+        setRecipes((prev) =>
+          prev.map((r) =>
+            r.id === action.data.newData.id ? action.data.newData : r,
+          ),
+        );
+        addToast("Recipe changes re-applied", "success");
+      }
+    },
+    [setRecipes, addToast],
+  );
 
   const exportRecipes = useCallback(async () => {
     try {
@@ -2089,86 +2909,8 @@ const App = () => {
 
   const searchRecipes = useCallback(
     (query, filters) => {
-      filters = filters || {};
-      const normalizedQuery = query ? query.toLowerCase().trim() : "";
-
-      return recipes.filter((recipe) => {
-        if (!recipe || typeof recipe.name !== "string") return false;
-
-        let matchesQuery = !normalizedQuery;
-        if (normalizedQuery) {
-          const nameMatch = recipe.name.toLowerCase().includes(normalizedQuery);
-          const typeMatch = recipe.type
-            ?.toLowerCase()
-            .includes(normalizedQuery);
-          matchesQuery = nameMatch || typeMatch;
-        }
-
-        let matchesType = true;
-        if (filters.type) {
-          if (filters.type === "_NONE_") {
-            matchesType = !recipe.type || recipe.type.trim() === "";
-          } else {
-            matchesType = recipe.type === filters.type;
-          }
-        }
-
-        let matchesCuisine = true;
-        if (filters.cuisine) {
-          if (filters.cuisine === "_NONE_") {
-            matchesCuisine = !recipe.cuisine || recipe.cuisine.trim() === "";
-          } else {
-            matchesCuisine = recipe.cuisine === filters.cuisine;
-          }
-        }
-
-        let matchesDietary = true;
-        if (filters.dietaryType) {
-          if (filters.dietaryType === "_NONE_") {
-            matchesDietary =
-              !recipe.dietaryTypes || recipe.dietaryTypes.length === 0;
-          } else {
-            matchesDietary = recipe.dietaryTypes?.includes(filters.dietaryType);
-          }
-        }
-
-        let matchesTag = true;
-        if (filters.tag) {
-          if (filters.tag === "_NONE_") {
-            matchesTag = !recipe.tags || recipe.tags.length === 0;
-          } else {
-            const normalizedTagQuery = filters.tag.toLowerCase().trim();
-            matchesTag = recipe.tags?.some(
-              (tag) => tag.toLowerCase() === normalizedTagQuery,
-            );
-          }
-        }
-
-        const matchesFavorite = filters.favorites
-          ? recipe.isFavorite === true
-          : true;
-
-        const totalTime =
-          parseInt(recipe.prepTime || 0) +
-          parseInt(recipe.cookTime || 0) +
-          parseInt(recipe.additionalTime || 0);
-        const filterCookTime = filters.cookTime
-          ? parseInt(filters.cookTime)
-          : Infinity;
-        const matchesCookTime = filters.cookTime
-          ? totalTime <= filterCookTime
-          : true;
-
-        return (
-          matchesQuery &&
-          matchesType &&
-          matchesCuisine &&
-          matchesDietary &&
-          matchesTag &&
-          matchesFavorite &&
-          matchesCookTime
-        );
-      });
+      // FEATURE 14: Smart Search with fuzzy matching
+      return smartSearch(recipes, query, filters);
     },
     [recipes],
   );
@@ -2791,6 +3533,19 @@ const App = () => {
         openInventoryModal={() => setShowInventoryModal(true)}
         openCollectionsModal={() => setShowCollectionsModal(true)}
         openAnalyticsModal={() => setShowAnalyticsModal(true)}
+        openSuggestionsModal={() => setShowSuggestionsModal(true)}
+        openMealPrepModal={() => setShowMealPrepModal(true)}
+        openNutritionGoalsModal={() => setShowNutritionGoalsModal(true)}
+        openCloudSyncModal={() => setShowCloudSyncModal(true)}
+        toggleBulkMode={() => {
+          setIsBulkMode(!isBulkMode);
+          setSelectedRecipes([]);
+        }}
+        isBulkMode={isBulkMode}
+        isHighContrast={isHighContrast}
+        toggleHighContrast={() => setIsHighContrast(!isHighContrast)}
+        isDarkMode={isDarkMode}
+        toggleDarkMode={() => setIsDarkMode(!isDarkMode)}
         recipes={recipes}
         addToast={addToast}
         setRecipes={setRecipes}
@@ -2813,6 +3568,15 @@ const App = () => {
             searchRecipes={searchRecipes}
             openRecipeDetails={(recipe) => setShowRecipeDetails(recipe)}
             toggleFavorite={toggleFavorite}
+            isBulkMode={isBulkMode}
+            selectedRecipes={selectedRecipes}
+            toggleRecipeSelection={(id) => {
+              setSelectedRecipes((prev) =>
+                prev.includes(id)
+                  ? prev.filter((r) => r !== id)
+                  : [...prev, id],
+              );
+            }}
           />
         )}
       </main>
@@ -2897,8 +3661,16 @@ const App = () => {
           removeRecipeFromCollection={removeRecipeFromCollection}
           deleteCollection={deleteCollection}
           openRecipeDetails={(recipe) => setShowRecipeDetails(recipe)}
-          onClose={() => setShowCollectionsModal(false)}
+          onClose={() => {
+            setShowCollectionsModal(false);
+            if (collectionsBulkMode) {
+              setCollectionsBulkMode(false);
+              setSelectedRecipes([]);
+              setIsBulkMode(false);
+            }
+          }}
           addToast={addToast}
+          selectedRecipes={collectionsBulkMode ? selectedRecipes : []}
         />
       )}
       {showAnalyticsModal && (
@@ -2957,6 +3729,16 @@ const Header = ({
   openInventoryModal,
   openCollectionsModal,
   openAnalyticsModal,
+  openSuggestionsModal,
+  openMealPrepModal,
+  openNutritionGoalsModal,
+  openCloudSyncModal,
+  toggleBulkMode,
+  isBulkMode,
+  isHighContrast,
+  toggleHighContrast,
+  isDarkMode,
+  toggleDarkMode,
   recipes,
   addToast,
   setRecipes,
@@ -3157,6 +3939,41 @@ const Header = ({
       label: "Analytics & Stats",
       icon: "fas fa-chart-line",
       action: openAnalyticsModal,
+    },
+    {
+      label: "Recipe Suggestions",
+      icon: "fas fa-lightbulb",
+      action: openSuggestionsModal,
+    },
+    {
+      label: "Meal Prep Planner",
+      icon: "fas fa-calendar-check",
+      action: openMealPrepModal,
+    },
+    {
+      label: "Nutrition Goals",
+      icon: "fas fa-chart-pie",
+      action: openNutritionGoalsModal,
+    },
+    {
+      label: "Cloud Sync",
+      icon: "fas fa-cloud",
+      action: openCloudSyncModal,
+    },
+    {
+      label: isBulkMode ? "Exit Bulk Mode" : "Bulk Select Mode",
+      icon: "fas fa-check-square",
+      action: toggleBulkMode,
+    },
+    {
+      label: isDarkMode ? "Light Mode" : "Dark Mode",
+      icon: isDarkMode ? "fas fa-sun" : "fas fa-moon",
+      action: toggleDarkMode,
+    },
+    {
+      label: isHighContrast ? "Normal Contrast" : "High Contrast",
+      icon: "fas fa-adjust",
+      action: toggleHighContrast,
     },
     {
       label: "Share All Recipes",
@@ -3403,6 +4220,9 @@ const RecipeList = ({
   searchRecipes,
   openRecipeDetails,
   toggleFavorite,
+  isBulkMode,
+  selectedRecipes,
+  toggleRecipeSelection,
 }) => {
   const [filteredRecipes, setFilteredRecipes] = useState([]);
   const [filters, setFilters] = useState({
@@ -3594,11 +4414,29 @@ const RecipeList = ({
           recipesToDisplay.map((recipe) => (
             <div
               key={recipe.id}
-              onClick={() => openRecipeDetails(recipe)}
+              onClick={() => !isBulkMode && openRecipeDetails(recipe)}
               tabIndex="0"
               aria-label={`View recipe: ${recipe.name}`}
-              className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden cursor-pointer hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-all duration-300 flex flex-col group"
+              className={`bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden cursor-pointer hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-all duration-300 flex flex-col group ${
+                isBulkMode && selectedRecipes.includes(recipe.id)
+                  ? "ring-2 ring-green-500"
+                  : ""
+              }`}
             >
+              {isBulkMode && (
+                <div className="absolute top-2 left-2 z-10">
+                  <input
+                    type="checkbox"
+                    checked={selectedRecipes.includes(recipe.id)}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      toggleRecipeSelection(recipe.id);
+                    }}
+                    className="multi-select-checkbox"
+                    aria-label={`Select ${recipe.name}`}
+                  />
+                </div>
+              )}
               <div className="aspect-video w-full bg-gray-200 dark:bg-gray-700 overflow-hidden relative">
                 {recipe.image ? (
                   <img
@@ -3839,6 +4677,12 @@ const AddRecipeModal = ({
   const [videoPreview, setVideoPreview] = useState(null);
   const [formErrors, setFormErrors] = useState({});
 
+  // FEATURE 10: Auto-save drafts
+  useDraftSaver(
+    formData,
+    editingRecipe ? null : LOCAL_STORAGE_KEYS.RECIPE_DRAFT,
+  );
+
   useEffect(() => {
     if (editingRecipe) {
       const getHours = (totalMins) => Math.floor(totalMins / 60);
@@ -3887,11 +4731,19 @@ const AddRecipeModal = ({
       setImagePreview(editingRecipe.image || null);
       setVideoPreview(editingRecipe.video || null);
     } else {
-      setFormData(initialFormState);
+      // FEATURE 10: Load draft when creating new recipe
+      const draft = loadDraft(LOCAL_STORAGE_KEYS.RECIPE_DRAFT);
+      if (draft) {
+        setFormData({ ...initialFormState, ...draft });
+        if (draft.image) setImagePreview(draft.image);
+        if (draft.video) setVideoPreview(draft.video);
+      } else {
+        setFormData(initialFormState);
+        setImagePreview(null);
+        setVideoPreview(null);
+      }
       setTags([]);
       setTipsAndTricks([]);
-      setImagePreview(null);
-      setVideoPreview(null);
     }
     setFormErrors({});
   }, [editingRecipe, initialFormState]);
@@ -4055,6 +4907,8 @@ const AddRecipeModal = ({
         updateRecipe(editingRecipe.id, recipeData);
       } else {
         addRecipe(recipeData);
+        // FEATURE 10: Clear draft after successful submission
+        clearDraft(LOCAL_STORAGE_KEYS.RECIPE_DRAFT);
       }
     },
     [
@@ -4203,14 +5057,16 @@ const AddRecipeModal = ({
                 }`}
               >
                 <option value="">Select a course...</option>
-                <option value="Appetizer">Appetizer</option>
-                <option value="Salads">Salads</option>
-                <option value="Soups/Stews">Soups/Stews</option>
+                <option value="Appetizer">Appetizers</option>
+                <option value="Beverages">Beverages</option>
+                <option value="Breads">Breads</option>
+                <option value="Dessert">Desserts</option>
                 <option value="Main">Main</option>
-                <option value="Dessert">Dessert</option>
                 <option value="Dressings, Marinades, Sauces, & Seasoning">
                   Dressings, Marinades, Sauces, & Seasoning
                 </option>
+                <option value="Salads">Salads</option>
+                <option value="Soups/Stews">Soups/Stews</option>
               </select>
               <ErrorMessage name="course" />
             </div>
@@ -4948,21 +5804,52 @@ const RecipeDetailsModal = ({
   checkRecipeAvailability,
   inventory,
 }) => {
-  const baseServings = recipe?.servings > 0 ? recipe.servings : 1;
+  const [fullRecipe, setFullRecipe] = useState(null);
+  const [isLoadingFullRecipe, setIsLoadingFullRecipe] = useState(false);
+  const baseServings =
+    (fullRecipe || recipe)?.servings > 0 ? (fullRecipe || recipe).servings : 1;
   const [currentServings, setCurrentServings] = useState(baseServings);
   const servingsMultiplier = currentServings / baseServings;
   const [showAddToMealPlanSelector, setShowAddToMealPlanSelector] =
     useState(false);
+  const [showSubstitutionModal, setShowSubstitutionModal] = useState(null); // FEATURE 13
+  const [showPhotoGallery, setShowPhotoGallery] = useState(false); // FEATURE 23
+  const [showVideoPlayer, setShowVideoPlayer] = useState(false); // FEATURE 24
+
+  // Fetch full recipe data from IndexedDB if only partial data is provided
+  useEffect(() => {
+    const loadFullRecipe = async () => {
+      setIsLoadingFullRecipe(true);
+      if (recipe && recipe.id) {
+        const dbRecipe = await getItem(STORE_NAMES.RECIPES, recipe.id);
+        console.log("Recipe from DB:", dbRecipe);
+        console.log("Has ingredients:", dbRecipe?.ingredients);
+        console.log("Has directions:", dbRecipe?.directions);
+        if (dbRecipe) {
+          setFullRecipe(dbRecipe);
+        } else {
+          setFullRecipe(recipe);
+        }
+      } else {
+        setFullRecipe(recipe);
+      }
+      setIsLoadingFullRecipe(false);
+    };
+    loadFullRecipe();
+  }, [recipe]);
+
+  // Use fullRecipe for all operations
+  const currentRecipe = fullRecipe || recipe;
 
   const handleServingsChange = useCallback((value) => {
     setCurrentServings(Math.max(1, parseInt(value) || 1));
   }, []);
   const totalTime = useMemo(
     () =>
-      parseInt(recipe?.prepTime || 0) +
-      parseInt(recipe?.cookTime || 0) +
-      parseInt(recipe?.additionalTime || 0),
-    [recipe],
+      parseInt(fullRecipe?.prepTime || 0) +
+      parseInt(fullRecipe?.cookTime || 0) +
+      parseInt(fullRecipe?.additionalTime || 0),
+    [fullRecipe],
   );
   const handleOverlayClick = useCallback(
     (e) => {
@@ -5327,6 +6214,17 @@ const RecipeDetailsModal = ({
                         )}
                         {escapeHTML(description)}
                       </span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowSubstitutionModal(ing);
+                        }}
+                        className="text-blue-500 hover:text-blue-700 text-xs ml-2"
+                        title="Find substitutions"
+                        aria-label={`Find substitutions for ${description}`}
+                      >
+                        <i className="fas fa-exchange-alt"></i>
+                      </button>
                     </li>
                   );
                 }) || <li className="text-gray-500 italic">No ingredients.</li>}
@@ -5395,47 +6293,87 @@ const RecipeDetailsModal = ({
             onClick={() => startCookingSession && startCookingSession(recipe)}
             className="btn-modal bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white font-semibold"
             title="Start interactive cooking mode"
+            aria-label="Start interactive cooking mode"
           >
             <i className="fas fa-play mr-1.5"></i>Start Cooking
           </button>
-          <button
-            onClick={() => generateRecipePDF(recipe)}
-            className="btn-modal bg-pink-500 hover:bg-pink-600 text-white"
-          >
-            <i className="fas fa-file-pdf mr-1.5"></i>PDF
-          </button>
+
+          {recipe.photos && recipe.photos.length > 0 && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowPhotoGallery(true);
+              }}
+              className="btn-modal bg-blue-500 hover:bg-blue-600 text-white"
+              aria-label={`View ${recipe.photos.length} photos`}
+            >
+              <i className="fas fa-images mr-1.5"></i>
+              Photos ({recipe.photos.length})
+            </button>
+          )}
+
+          {recipe.videos && recipe.videos.length > 0 && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowVideoPlayer(true);
+              }}
+              className="btn-modal bg-red-500 hover:bg-red-600 text-white"
+              aria-label={`Watch ${recipe.videos.length} videos`}
+            >
+              <i className="fas fa-video mr-1.5"></i>
+              Videos ({recipe.videos.length})
+            </button>
+          )}
+
           <button
             onClick={() => addToShoppingList(recipe.id)}
             className="btn-modal btn-gray"
+            aria-label="Add ingredients to shopping list"
           >
             <i className="fas fa-cart-plus mr-1.5"></i>Add to List
           </button>
           <button
             onClick={() => setShowAddToMealPlanSelector(true)}
             className="btn-modal bg-indigo-500 hover:bg-indigo-600 text-white"
+            aria-label="Add to meal plan"
           >
             <i className="fas fa-calendar-plus mr-1.5"></i>Add to Plan
           </button>
           <button
             onClick={handleShareRecipe}
             className="btn-modal bg-purple-700 hover:bg-purple-800 text-white"
+            aria-label="Share recipe"
           >
             <i className="fas fa-share-alt mr-1.5"></i>Share
           </button>
           <button
             onClick={async () => {
-              const qrUrl = await generateQRCode(
-                JSON.stringify({
-                  name: recipe.name,
-                  ingredients: recipe.ingredients,
-                  directions: recipe.directions,
-                }),
-              );
-              window.open(qrUrl, "_blank");
-              addToast("QR Code opened in new tab", "success");
+              // Use currentRecipe which has all data loaded
+              console.log("Generating QR for currentRecipe:", currentRecipe);
+              const qrUrl = await generateQRCode(currentRecipe);
+              // Show QR code in a modal instead of opening in new tab
+              const qrModal = document.createElement("div");
+              qrModal.style.cssText =
+                "position:fixed;inset:0;background:rgba(0,0,0,0.8);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;";
+              qrModal.innerHTML = `
+                <div style="background:white;border-radius:12px;padding:30px;text-align:center;max-width:500px;">
+                  <h3 style="font-size:24px;font-weight:bold;margin-bottom:15px;color:#111;">📱 Share Recipe</h3>
+                  <p style="color:#666;margin-bottom:20px;">Scan this QR code to view the recipe on any device</p>
+                  <img src="${qrUrl}" alt="QR Code" style="width:300px;height:300px;margin:0 auto 20px;border:3px solid #eee;border-radius:8px;">
+                  <p style="color:#888;font-size:14px;margin-bottom:20px;">Recipe: ${recipe.name}</p>
+                  <button onclick="this.parentElement.parentElement.remove()" style="background:#10b981;color:white;border:none;padding:10px 24px;border-radius:6px;font-size:16px;cursor:pointer;font-weight:600;">Close</button>
+                </div>
+              `;
+              document.body.appendChild(qrModal);
+              qrModal.onclick = (e) => {
+                if (e.target === qrModal) qrModal.remove();
+              };
+              addToast("QR Code generated! Share to view recipe.", "success");
             }}
             className="btn-modal bg-cyan-500 hover:bg-cyan-600 text-white"
-            title="Generate QR Code"
+            title="Generate shareable QR Code"
+            aria-label="Generate QR code for recipe"
           >
             <i className="fas fa-qrcode mr-1.5"></i>QR
           </button>
@@ -5443,6 +6381,7 @@ const RecipeDetailsModal = ({
             onClick={handleExportSingleRecipe}
             className="btn-modal bg-green-500 hover:bg-green-600 text-white"
             title="Export this recipe"
+            aria-label="Export this recipe as JSON"
           >
             <i className="fas fa-file-export mr-1.5"></i>Export
           </button>
@@ -5468,6 +6407,29 @@ const RecipeDetailsModal = ({
           onClose={() => setShowAddToMealPlanSelector(false)}
           addToast={addToast}
           recipes={recipes}
+        />
+      )}
+
+      {showSubstitutionModal && (
+        <SubstitutionsModal
+          ingredient={showSubstitutionModal}
+          onClose={() => setShowSubstitutionModal(null)}
+        />
+      )}
+
+      {showPhotoGallery && recipe.photos && (
+        <PhotoGalleryModal
+          photos={recipe.photos}
+          currentIndex={0}
+          onClose={() => setShowPhotoGallery(false)}
+        />
+      )}
+
+      {showVideoPlayer && recipe.videos && (
+        <VideoClipsModal
+          videos={recipe.videos}
+          currentIndex={0}
+          onClose={() => setShowVideoPlayer(false)}
         />
       )}
     </div>
@@ -6483,8 +7445,22 @@ const Cookbook = () => {
 
   const [isBookOpen, setIsBookOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
-  const [bookTitle, setBookTitle] = useState("My Recipe Collection");
-  const [bookCoverImage, setBookCoverImage] = useState(null);
+  const [bookTitle, setBookTitle] = useState(() => {
+    try {
+      const saved = localStorage.getItem("bookTitle");
+      return saved !== null ? saved : "My Recipe Collection";
+    } catch {
+      return "My Recipe Collection";
+    }
+  });
+  const [bookCoverImage, setBookCoverImage] = useState(() => {
+    try {
+      const saved = localStorage.getItem("bookCoverImage");
+      return saved || null;
+    } catch {
+      return null;
+    }
+  });
   const [showCoverEditor, setShowCoverEditor] = useState(false);
   const [editingRecipe, setEditingRecipe] = useState(null);
   const [showAddRecipeModal, setShowAddRecipeModal] = useState(false);
@@ -6493,12 +7469,68 @@ const Cookbook = () => {
   const [showShoppingListModal, setShowShoppingListModal] = useState(false);
   const [showInventoryModal, setShowInventoryModal] = useState(false);
   const [showCollectionsModal, setShowCollectionsModal] = useState(false);
+  const [collectionsBulkMode, setCollectionsBulkMode] = useState(false);
   const [showAnalyticsModal, setShowAnalyticsModal] = useState(false);
   const [showCookingMode, setShowCookingMode] = useState(null);
   const [displayUnitSystem, setDisplayUnitSystem] = useState("imperial");
 
+  // New feature states
+  const [showSuggestionsModal, setShowSuggestionsModal] = useState(false);
+  const [showMealPrepModal, setShowMealPrepModal] = useState(false);
+  const [showNutritionGoalsModal, setShowNutritionGoalsModal] = useState(false);
+  const [showCloudSyncModal, setShowCloudSyncModal] = useState(false);
+  const [isBulkMode, setIsBulkMode] = useState(false);
+  const [selectedRecipes, setSelectedRecipes] = useState([]);
+  const [isHighContrast, setIsHighContrast] = useState(() => {
+    try {
+      return localStorage.getItem(LOCAL_STORAGE_KEYS.HIGH_CONTRAST) === "true";
+    } catch {
+      return false;
+    }
+  });
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    return (
+      window.matchMedia &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches
+    );
+  });
+
+  const [nutritionGoals, setNutritionGoals, isLoadingGoals] =
+    usePersistentStorage(
+      STORE_NAMES.NUTRITION_GOALS,
+      { calories: 2000, protein: 50, carbs: 250, fat: 70 },
+      addToast,
+    );
+
+  const [ingredientPrices, setIngredientPrices, isLoadingPrices] =
+    usePersistentStorage(STORE_NAMES.INGREDIENT_PRICES, {}, addToast);
+
   const { timers, addTimer, toggleTimer, removeTimer, resetTimer } =
     useTimers(addToast);
+
+  const { recordAction, undo, redo, canUndo, canRedo } = useUndoRedo();
+
+  // Persist book title and cover image to localStorage
+  useEffect(() => {
+    try {
+      // Save even if empty string
+      localStorage.setItem("bookTitle", bookTitle);
+    } catch (error) {
+      console.error("Failed to save book title:", error);
+    }
+  }, [bookTitle]);
+
+  useEffect(() => {
+    try {
+      if (bookCoverImage) {
+        localStorage.setItem("bookCoverImage", bookCoverImage);
+      } else {
+        localStorage.removeItem("bookCoverImage");
+      }
+    } catch (error) {
+      console.error("Failed to save book cover image:", error);
+    }
+  }, [bookCoverImage]);
 
   const isLoading =
     isLoadingRecipes ||
@@ -6507,7 +7539,137 @@ const Cookbook = () => {
     isLoadingInventory ||
     isLoadingRatings ||
     isLoadingCollections ||
-    isLoadingSessions;
+    isLoadingSessions ||
+    isLoadingGoals ||
+    isLoadingPrices;
+
+  // Execute undo action
+  const executeUndoAction = useCallback(
+    (action) => {
+      if (action.type === "ADD_RECIPE") {
+        setRecipes((prev) => prev.filter((r) => r.id !== action.data.id));
+        addToast("Recipe addition undone", "info");
+      } else if (action.type === "DELETE_RECIPE") {
+        setRecipes((prev) => [...prev, action.data]);
+        addToast("Recipe deletion undone", "info");
+      } else if (action.type === "UPDATE_RECIPE") {
+        setRecipes((prev) =>
+          prev.map((r) =>
+            r.id === action.data.oldRecipe.id ? action.data.oldRecipe : r,
+          ),
+        );
+        addToast("Recipe update undone", "info");
+      }
+    },
+    [setRecipes, addToast],
+  );
+
+  // Execute redo action
+  const executeRedoAction = useCallback(
+    (action) => {
+      if (action.type === "ADD_RECIPE") {
+        setRecipes((prev) => [...prev, action.data]);
+        addToast("Recipe addition redone", "info");
+      } else if (action.type === "DELETE_RECIPE") {
+        setRecipes((prev) => prev.filter((r) => r.id !== action.data.id));
+        addToast("Recipe deletion redone", "info");
+      } else if (action.type === "UPDATE_RECIPE") {
+        setRecipes((prev) =>
+          prev.map((r) =>
+            r.id === action.data.newRecipe.id ? action.data.newRecipe : r,
+          ),
+        );
+        addToast("Recipe update redone", "info");
+      }
+    },
+    [setRecipes, addToast],
+  );
+
+  // High contrast mode effect
+  useEffect(() => {
+    if (isHighContrast) {
+      document.body.classList.add("high-contrast-mode");
+      localStorage.setItem(LOCAL_STORAGE_KEYS.HIGH_CONTRAST, "true");
+    } else {
+      document.body.classList.remove("high-contrast-mode");
+      localStorage.setItem(LOCAL_STORAGE_KEYS.HIGH_CONTRAST, "false");
+    }
+  }, [isHighContrast]);
+
+  // Dark mode detection
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const handleChange = (e) => setIsDarkMode(e.matches);
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, []);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.ctrlKey && e.key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        if (canUndo) undo();
+      } else if (e.ctrlKey && e.shiftKey && e.key === "Z") {
+        e.preventDefault();
+        if (canRedo) redo();
+      } else if (e.ctrlKey && e.key === "n") {
+        e.preventDefault();
+        setEditingRecipe(null);
+        setShowAddRecipeModal(true);
+      } else if (e.key === "Escape") {
+        setShowAddRecipeModal(false);
+        setShowMealPlanModal(false);
+        setShowShoppingListModal(false);
+        setShowInventoryModal(false);
+        setShowCollectionsModal(false);
+        setShowAnalyticsModal(false);
+        setShowCookingMode(null);
+        setShowRecipeDetails(null);
+        setShowSuggestionsModal(false);
+        setShowMealPrepModal(false);
+        setShowNutritionGoalsModal(false);
+        setShowCloudSyncModal(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [canUndo, canRedo, undo, redo]);
+
+  // Modal-open body class
+  useEffect(() => {
+    if (
+      showAddRecipeModal ||
+      showRecipeDetails ||
+      showMealPlanModal ||
+      showShoppingListModal ||
+      showInventoryModal ||
+      showCollectionsModal ||
+      showAnalyticsModal ||
+      showCookingMode ||
+      showSuggestionsModal ||
+      showMealPrepModal ||
+      showNutritionGoalsModal ||
+      showCloudSyncModal
+    ) {
+      document.body.classList.add("modal-open");
+    } else {
+      document.body.classList.remove("modal-open");
+    }
+  }, [
+    showAddRecipeModal,
+    showRecipeDetails,
+    showMealPlanModal,
+    showShoppingListModal,
+    showInventoryModal,
+    showCollectionsModal,
+    showAnalyticsModal,
+    showCookingMode,
+    showSuggestionsModal,
+    showMealPrepModal,
+    showNutritionGoalsModal,
+    showCloudSyncModal,
+  ]);
 
   // All the recipe management functions from original App
   const addRecipe = useCallback(
@@ -6529,6 +7691,7 @@ const Cookbook = () => {
       try {
         await addItem(STORE_NAMES.RECIPES, newRecipe);
         setRecipes((prev) => [...prev, newRecipe]);
+        recordAction({ type: "ADD_RECIPE", data: newRecipe });
         setShowAddRecipeModal(false);
         setEditingRecipe(null);
         addToast("Recipe added!", "success");
@@ -6544,11 +7707,13 @@ const Cookbook = () => {
       setShowAddRecipeModal,
       setEditingRecipe,
       setCurrentPage,
+      recordAction,
     ],
   );
 
   const updateRecipe = useCallback(
     async (id, recipeData) => {
+      const oldRecipe = recipes.find((r) => r.id === id);
       const updatedRecipe = {
         ...recipeData,
         id: id,
@@ -6559,6 +7724,10 @@ const Cookbook = () => {
         setRecipes((prev) =>
           prev.map((r) => (r.id === id ? updatedRecipe : r)),
         );
+        recordAction({
+          type: "UPDATE_RECIPE",
+          data: { oldRecipe, newRecipe: updatedRecipe },
+        });
         setShowAddRecipeModal(false);
         setEditingRecipe(null);
         addToast("Recipe updated!", "success");
@@ -6567,16 +7736,25 @@ const Cookbook = () => {
         addToast("Failed to update recipe.", "error");
       }
     },
-    [setRecipes, addToast, setShowAddRecipeModal, setEditingRecipe],
+    [
+      setRecipes,
+      addToast,
+      setShowAddRecipeModal,
+      setEditingRecipe,
+      recordAction,
+      recipes,
+    ],
   );
 
   const deleteRecipe = useCallback(
     async (id) => {
       if (!window.confirm("Are you sure you want to delete this recipe?"))
         return;
+      const recipeToDelete = recipes.find((r) => r.id === id);
       try {
         await deleteItem(STORE_NAMES.RECIPES, id);
         setRecipes((prev) => prev.filter((r) => r.id !== id));
+        recordAction({ type: "DELETE_RECIPE", data: recipeToDelete });
         setMealPlan((prev) => {
           const newPlan = JSON.parse(JSON.stringify(prev));
           let changed = false;
@@ -6606,7 +7784,7 @@ const Cookbook = () => {
         addToast("Failed to delete recipe.", "error");
       }
     },
-    [setRecipes, setMealPlan, setShoppingList, addToast],
+    [setRecipes, setMealPlan, setShoppingList, addToast, recordAction, recipes],
   );
 
   const toggleFavorite = useCallback(
@@ -6935,6 +8113,8 @@ const Cookbook = () => {
     const structure = {
       Favorites: {},
       Appetizer: {},
+      Beverages: {},
+      Breads: {},
       Salads: {},
       "Soups/Stews": {},
       Main: {},
@@ -7025,33 +8205,20 @@ const Cookbook = () => {
     }
   }, [currentPage]);
 
-  const goToPage = useCallback(
-    (page) => {
-      const container = document.querySelector(".pages-container");
-      const isForward = page > currentPage;
-      if (container) {
-        container.classList.add(
-          isForward ? "page-turning-next" : "page-turning-prev",
-        );
-      }
-      setTimeout(() => {
-        setCurrentPage(page);
-        if (container) {
-          setTimeout(() => {
-            container.classList.remove(
-              "page-turning-next",
-              "page-turning-prev",
-            );
-          }, 50);
-        }
-      }, 300);
-    },
-    [currentPage],
-  );
+  const goToPage = useCallback((page) => {
+    console.log("goToPage called with:", page);
+    setCurrentPage(page);
+  }, []);
 
   const openBook = useCallback(() => {
-    setIsBookOpen(true);
-    setCurrentPage(0);
+    const cover = document.querySelector(".book-cover");
+    if (cover) {
+      cover.classList.add("opening");
+    }
+    setTimeout(() => {
+      setIsBookOpen(true);
+      setCurrentPage(0);
+    }, 1000);
   }, []);
 
   const closeBook = useCallback(() => {
@@ -7134,6 +8301,11 @@ const Cookbook = () => {
     },
     [setInventory, addToast],
   );
+
+  const clearAllInventory = useCallback(async () => {
+    await setInventory([]);
+    addToast("Inventory cleared", "success");
+  }, [setInventory, addToast]);
 
   const checkRecipeAvailability = useCallback(
     (recipe) => {
@@ -7307,13 +8479,25 @@ const Cookbook = () => {
           {!isBookOpen ? (
             <>
               <div className="book-cover">
-                <button
-                  onClick={() => setShowCoverEditor(true)}
-                  className="cover-edit-btn"
-                >
-                  <i className="fas fa-edit mr-1"></i> Edit Cover
-                </button>
-                <h1 className="book-cover-title">{bookTitle}</h1>
+                <div className="cover-header">
+                  <h1 className="book-cover-title">{bookTitle}</h1>
+                  <div className="cover-buttons-container">
+                    <button
+                      onClick={() => setShowCoverEditor(true)}
+                      className="cover-edit-btn"
+                      title="Edit Cover"
+                    >
+                      <i className="fas fa-edit"></i>
+                    </button>
+                    <button
+                      onClick={openBook}
+                      className="open-book-btn"
+                      title="Open Cookbook"
+                    >
+                      <i className="fas fa-book-open"></i>
+                    </button>
+                  </div>
+                </div>
                 {bookCoverImage && (
                   <img
                     src={bookCoverImage}
@@ -7321,9 +8505,6 @@ const Cookbook = () => {
                     className="book-cover-image"
                   />
                 )}
-                <button onClick={openBook} className="open-book-btn">
-                  <i className="fas fa-book-open mr-2"></i> Open Cookbook
-                </button>
               </div>
               <div className="book-spine"></div>
             </>
@@ -7359,6 +8540,21 @@ const Cookbook = () => {
                 setShowInventoryModal={setShowInventoryModal}
                 setShowCollectionsModal={setShowCollectionsModal}
                 setShowAnalyticsModal={setShowAnalyticsModal}
+                setShowSuggestionsModal={setShowSuggestionsModal}
+                setShowMealPrepModal={setShowMealPrepModal}
+                setShowNutritionGoalsModal={setShowNutritionGoalsModal}
+                setShowCloudSyncModal={setShowCloudSyncModal}
+                isBulkMode={isBulkMode}
+                setIsBulkMode={setIsBulkMode}
+                selectedRecipes={selectedRecipes}
+                setSelectedRecipes={setSelectedRecipes}
+                isHighContrast={isHighContrast}
+                setIsHighContrast={setIsHighContrast}
+                isDarkMode={isDarkMode}
+                canUndo={canUndo}
+                canRedo={canRedo}
+                onUndo={undo}
+                onRedo={redo}
                 startCookingSession={startCookingSession}
                 exportRecipes={exportRecipes}
                 importRecipes={importRecipes}
@@ -7433,6 +8629,12 @@ const Cookbook = () => {
           addTimer={addTimer}
           updateMealPlan={updateMealPlan}
           mealPlan={mealPlan}
+          recipes={recipes}
+          startCookingSession={startCookingSession}
+          getRecipeRatings={getRecipeRatings}
+          addRating={addRating}
+          checkRecipeAvailability={checkRecipeAvailability}
+          inventory={inventory}
           displayUnitSystem={displayUnitSystem}
           setDisplayUnitSystem={setDisplayUnitSystem}
           convertUnits={convertUnits}
@@ -7459,6 +8661,7 @@ const Cookbook = () => {
           addInventoryItem={addInventoryItem}
           updateInventoryItem={updateInventoryItem}
           deleteInventoryItem={deleteInventoryItem}
+          clearAllInventory={clearAllInventory}
           checkRecipeAvailability={checkRecipeAvailability}
           recipes={recipes}
           onClose={() => setShowInventoryModal(false)}
@@ -7475,8 +8678,16 @@ const Cookbook = () => {
           removeRecipeFromCollection={removeRecipeFromCollection}
           deleteCollection={deleteCollection}
           openRecipeDetails={(recipe) => setShowRecipeDetails(recipe)}
-          onClose={() => setShowCollectionsModal(false)}
+          onClose={() => {
+            setShowCollectionsModal(false);
+            if (collectionsBulkMode) {
+              setCollectionsBulkMode(false);
+              setSelectedRecipes([]);
+              setIsBulkMode(false);
+            }
+          }}
           addToast={addToast}
+          selectedRecipes={collectionsBulkMode ? selectedRecipes : []}
         />
       )}
 
@@ -7507,6 +8718,100 @@ const Cookbook = () => {
           addTimer={addTimer}
           addToast={addToast}
           addRating={addRating}
+        />
+      )}
+
+      {showSuggestionsModal && (
+        <RecipeSuggestionsModal
+          recipes={recipes}
+          inventory={inventory}
+          onClose={() => setShowSuggestionsModal(false)}
+          openRecipeDetails={(recipe) => setShowRecipeDetails(recipe)}
+          addToast={addToast}
+        />
+      )}
+
+      {showMealPrepModal && (
+        <MealPrepModal
+          recipes={recipes}
+          selectedRecipes={selectedRecipes}
+          onClose={() => setShowMealPrepModal(false)}
+          addToShoppingList={addToShoppingList}
+          addToast={addToast}
+        />
+      )}
+
+      {showNutritionGoalsModal && (
+        <NutritionGoalsModal
+          recipes={recipes}
+          cookingSessions={cookingSessions}
+          nutritionGoals={nutritionGoals}
+          setNutritionGoals={setNutritionGoals}
+          onClose={() => setShowNutritionGoalsModal(false)}
+          addToast={addToast}
+        />
+      )}
+
+      {showCloudSyncModal && (
+        <CloudSyncModal
+          onClose={() => setShowCloudSyncModal(false)}
+          addToast={addToast}
+        />
+      )}
+
+      {isBulkMode && (
+        <BulkOperationsToolbar
+          selectedCount={selectedRecipes.length}
+          onDelete={async () => {
+            if (
+              window.confirm(
+                `Delete ${selectedRecipes.length} selected recipes?`,
+              )
+            ) {
+              for (const id of selectedRecipes) {
+                await deleteRecipe(id);
+              }
+              setSelectedRecipes([]);
+              setIsBulkMode(false);
+              addToast(`Deleted ${selectedRecipes.length} recipes`, "success");
+            }
+          }}
+          onAddToCollection={() => {
+            setCollectionsBulkMode(true);
+            setShowCollectionsModal(true);
+          }}
+          onExport={async () => {
+            const selectedData = recipes.filter((r) =>
+              selectedRecipes.includes(r.id),
+            );
+            const dataStr = JSON.stringify(selectedData, null, 2);
+            const blob = new Blob([dataStr], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `selected-recipes-${Date.now()}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            addToast(`Exported ${selectedRecipes.length} recipes`, "success");
+            setSelectedRecipes([]);
+            setIsBulkMode(false);
+          }}
+          onCancel={() => {
+            setSelectedRecipes([]);
+            setIsBulkMode(false);
+          }}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          onUndo={() => {
+            const action = undo();
+            if (action) executeUndoAction(action);
+          }}
+          onRedo={() => {
+            const action = redo();
+            if (action) executeRedoAction(action);
+          }}
         />
       )}
 
@@ -7559,6 +8864,21 @@ const BookPages = ({
   setShowInventoryModal,
   setShowCollectionsModal,
   setShowAnalyticsModal,
+  setShowSuggestionsModal,
+  setShowMealPrepModal,
+  setShowNutritionGoalsModal,
+  setShowCloudSyncModal,
+  isBulkMode,
+  setIsBulkMode,
+  selectedRecipes,
+  setSelectedRecipes,
+  isHighContrast,
+  setIsHighContrast,
+  isDarkMode,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
   startCookingSession,
   inventory,
   checkRecipeAvailability,
@@ -7570,46 +8890,59 @@ const BookPages = ({
   const pageSpreadRef = useRef(null);
   const [isPageTurning, setIsPageTurning] = useState(false);
   const [turnDirection, setTurnDirection] = useState("forward");
-  const [isFading, setIsFading] = useState(false);
-  const [useThreeJS, setUseThreeJS] = useState(() => {
-    // Disable Three.js by default for cleaner page turns
-    // Users can enable it with the 3D button if they want the effect
-    return false;
-  });
+  const pagesContainerRef = useRef(null);
+  const [isQuickActionsMenuOpen, setIsQuickActionsMenuOpen] = useState(false);
 
-  // Enhanced page turn functions with fade effect
+  // Page turn with proper flip animation
   const handlePageTurnWithEffect = useCallback(
     (direction, pageFunc) => {
-      if (isFading) return; // Prevent multiple clicks during animation
+      if (isPageTurning) return;
 
-      if (useThreeJS && window.THREE) {
-        // Use Three.js animation
-        setTurnDirection(direction);
-        setIsPageTurning(true);
-        return;
+      setIsPageTurning(true);
+      setTurnDirection(direction);
+
+      // Add flipped class to trigger 3D rotation
+      if (pageSpreadRef.current) {
+        const rightPage = pageSpreadRef.current.querySelector(".right-page");
+        if (rightPage) {
+          if (direction === "forward") {
+            rightPage.classList.add("flipped");
+          } else {
+            rightPage.classList.remove("flipped");
+          }
+        }
       }
 
-      // Use fade animation
-      setIsFading(true);
-
-      // Wait for fade out, then change page, then fade in
+      // Change page at animation midpoint for smoother transition
       setTimeout(() => {
         pageFunc();
+        // Immediately remove flipped class on new page content
         setTimeout(() => {
-          setIsFading(false);
-        }, 50); // Small delay before fade in starts
-      }, 300); // Match fade out duration
+          if (pageSpreadRef.current) {
+            const rightPage =
+              pageSpreadRef.current.querySelector(".right-page");
+            if (rightPage) {
+              rightPage.classList.remove("flipped");
+            }
+          }
+          setIsPageTurning(false);
+        }, 50);
+      }, 600); // Halfway through animation
     },
-    [useThreeJS, isFading],
+    [isPageTurning],
   );
 
   const handlePrevPageWithEffect = useCallback(() => {
-    handlePageTurnWithEffect("backward", onPrevPage);
-  }, [handlePageTurnWithEffect, onPrevPage]);
+    if (currentPage > 0) {
+      handlePageTurnWithEffect("backward", onPrevPage);
+    }
+  }, [handlePageTurnWithEffect, onPrevPage, currentPage]);
 
   const handleNextPageWithEffect = useCallback(() => {
-    handlePageTurnWithEffect("forward", onNextPage);
-  }, [handlePageTurnWithEffect, onNextPage]);
+    if (currentPage < totalPages - 1) {
+      handlePageTurnWithEffect("forward", onNextPage);
+    }
+  }, [handlePageTurnWithEffect, onNextPage, currentPage, totalPages]);
 
   const onTurnComplete = useCallback(() => {
     setIsPageTurning(false);
@@ -7666,6 +8999,24 @@ const BookPages = ({
     };
   }, [handlePrevPageWithEffect, handleNextPageWithEffect]);
 
+  // Handle keyboard navigation
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (isPageTurning) return;
+
+      if (e.key === "ArrowLeft" || e.key === "PageUp") {
+        e.preventDefault();
+        handlePrevPageWithEffect();
+      } else if (e.key === "ArrowRight" || e.key === "PageDown") {
+        e.preventDefault();
+        handleNextPageWithEffect();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [handlePrevPageWithEffect, handleNextPageWithEffect, isPageTurning]);
+
   const [collapsedCategories, setCollapsedCategories] = useState(() => {
     // Start with all categories and sub-categories collapsed
     const initialState = {};
@@ -7685,6 +9036,24 @@ const BookPages = ({
     });
     return initialState;
   });
+
+  // Reset all categories to collapsed when returning to TOC
+  useEffect(() => {
+    if (currentPage === 0) {
+      const resetState = {};
+      Object.keys(categorizedRecipes).forEach((cat) => {
+        resetState[cat] = true;
+        Object.keys(categorizedRecipes[cat]).forEach((subCat) => {
+          resetState[`${cat}-${subCat}`] = true;
+        });
+      });
+      resetState["All Tags"] = true;
+      allTags.forEach((tag) => {
+        resetState[`All Tags-${tag}`] = true;
+      });
+      setCollapsedCategories(resetState);
+    }
+  }, [currentPage, categorizedRecipes, allTags]);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedTag, setSelectedTag] = useState(null);
@@ -7751,11 +9120,8 @@ const BookPages = ({
   // Page 0: TOC and Add Recipe spread
   if (currentPage === 0) {
     return (
-      <>
-        <div
-          className={`page-spread ${isFading ? "page-fade-out" : "page-fade-in"}`}
-          ref={pageSpreadRef}
-        >
+      <div className="pages-container" ref={pagesContainerRef}>
+        <div className="page-spread" ref={pageSpreadRef}>
           {/* Left page: TOC */}
           <div className="page left-page">
             <h1 className="toc-title">Table of Contents</h1>
@@ -7882,13 +9248,69 @@ const BookPages = ({
                                         (r) => r.id === recipe.id,
                                       );
                                       const recipePage = recipeIndex + 1;
+                                      const isSelected =
+                                        selectedRecipes.includes(recipe.id);
                                       return (
                                         <li
                                           key={recipe.id}
                                           className="toc-item"
-                                          onClick={() => onGoToPage(recipePage)}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (isBulkMode) {
+                                              setSelectedRecipes((prev) =>
+                                                prev.includes(recipe.id)
+                                                  ? prev.filter(
+                                                      (id) => id !== recipe.id,
+                                                    )
+                                                  : [...prev, recipe.id],
+                                              );
+                                            } else {
+                                              console.log(
+                                                "TOC item clicked:",
+                                                recipe.name,
+                                                "recipePage:",
+                                                recipePage,
+                                              );
+                                              onGoToPage(recipePage);
+                                            }
+                                          }}
+                                          style={{
+                                            cursor: "pointer",
+                                            position: "relative",
+                                            zIndex: 100,
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: "8px",
+                                          }}
                                         >
-                                          <span className="toc-item-title">
+                                          {isBulkMode && (
+                                            <input
+                                              type="checkbox"
+                                              checked={isSelected}
+                                              onChange={(e) => {
+                                                e.stopPropagation();
+                                                setSelectedRecipes((prev) =>
+                                                  prev.includes(recipe.id)
+                                                    ? prev.filter(
+                                                        (id) =>
+                                                          id !== recipe.id,
+                                                      )
+                                                    : [...prev, recipe.id],
+                                                );
+                                              }}
+                                              className="multi-select-checkbox"
+                                              style={{
+                                                width: "18px",
+                                                height: "18px",
+                                                cursor: "pointer",
+                                                flexShrink: 0,
+                                              }}
+                                            />
+                                          )}
+                                          <span
+                                            className="toc-item-title"
+                                            style={{ flex: 1 }}
+                                          >
                                             {recipe.isFavorite && (
                                               <i
                                                 className="fas fa-star"
@@ -8030,10 +9452,229 @@ const BookPages = ({
                 <i className={`fas fa-${useThreeJS ? "cube" : "square"}`}></i>{" "}
                 3D
               </button> */}
+              <button
+                onClick={() =>
+                  setIsQuickActionsMenuOpen(!isQuickActionsMenuOpen)
+                }
+                className="page-nav-btn"
+                style={{ marginRight: "10px" }}
+              >
+                <i className="fas fa-bars"></i> Quick Actions
+              </button>
               <button onClick={onCloseBook} className="page-nav-btn">
                 <i className="fas fa-times"></i> Close
               </button>
             </div>
+
+            {/* Quick Actions Dropdown Menu */}
+            {isQuickActionsMenuOpen && (
+              <div className="quick-actions-dropdown">
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShowMealPlanModal(true);
+                    setIsQuickActionsMenuOpen(false);
+                  }}
+                  className="btn-modal btn-blue"
+                  style={{ width: "100%", justifyContent: "center" }}
+                >
+                  <i className="fas fa-calendar-alt mr-2"></i> Meal Plan
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShowShoppingListModal(true);
+                    setIsQuickActionsMenuOpen(false);
+                  }}
+                  className="btn-modal bg-purple-500 hover:bg-purple-600 text-white"
+                  style={{ width: "100%", justifyContent: "center" }}
+                >
+                  <i className="fas fa-shopping-cart mr-2"></i> Shopping List
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShowInventoryModal(true);
+                    setIsQuickActionsMenuOpen(false);
+                  }}
+                  className="btn-modal"
+                  style={{
+                    width: "100%",
+                    justifyContent: "center",
+                    background: "#f97316",
+                    color: "white",
+                  }}
+                >
+                  <i className="fas fa-box mr-2"></i> Ingredient Inventory
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShowCollectionsModal(true);
+                    setIsQuickActionsMenuOpen(false);
+                  }}
+                  className="btn-modal"
+                  style={{
+                    width: "100%",
+                    justifyContent: "center",
+                    background: "#14b8a6",
+                    color: "white",
+                  }}
+                >
+                  <i className="fas fa-folder mr-2"></i> Collections
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShowAnalyticsModal(true);
+                    setIsQuickActionsMenuOpen(false);
+                  }}
+                  className="btn-modal"
+                  style={{
+                    width: "100%",
+                    justifyContent: "center",
+                    background: "#6366f1",
+                    color: "white",
+                  }}
+                >
+                  <i className="fas fa-chart-line mr-2"></i> Analytics & Stats
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    exportRecipes();
+                    setIsQuickActionsMenuOpen(false);
+                  }}
+                  className="btn-modal btn-green"
+                  style={{ width: "100%", justifyContent: "center" }}
+                >
+                  <i className="fas fa-file-export mr-2"></i> Export Recipes
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShowSuggestionsModal(true);
+                    setIsQuickActionsMenuOpen(false);
+                  }}
+                  className="btn-modal"
+                  style={{
+                    width: "100%",
+                    justifyContent: "center",
+                    background: "#eab308",
+                    color: "white",
+                  }}
+                  aria-label="Open recipe suggestions"
+                >
+                  <i className="fas fa-lightbulb mr-2"></i> Recipe Suggestions
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShowMealPrepModal(true);
+                    setIsQuickActionsMenuOpen(false);
+                  }}
+                  className="btn-modal"
+                  style={{
+                    width: "100%",
+                    justifyContent: "center",
+                    background: "#06b6d4",
+                    color: "white",
+                  }}
+                  aria-label="Open meal prep planner"
+                >
+                  <i className="fas fa-calendar-check mr-2"></i> Meal Prep
+                  Planner
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShowNutritionGoalsModal(true);
+                    setIsQuickActionsMenuOpen(false);
+                  }}
+                  className="btn-modal"
+                  style={{
+                    width: "100%",
+                    justifyContent: "center",
+                    background: "#8b5cf6",
+                    color: "white",
+                  }}
+                  aria-label="Open nutrition goals"
+                >
+                  <i className="fas fa-chart-pie mr-2"></i> Nutrition Goals
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShowCloudSyncModal(true);
+                    setIsQuickActionsMenuOpen(false);
+                  }}
+                  className="btn-modal"
+                  style={{
+                    width: "100%",
+                    justifyContent: "center",
+                    background: "#3b82f6",
+                    color: "white",
+                  }}
+                  aria-label="Open cloud sync"
+                >
+                  <i className="fas fa-cloud mr-2"></i> Cloud Sync
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setIsBulkMode(!isBulkMode);
+                    setIsQuickActionsMenuOpen(false);
+                  }}
+                  className="btn-modal"
+                  style={{
+                    width: "100%",
+                    justifyContent: "center",
+                    background: isBulkMode ? "#10b981" : "#6b7280",
+                    color: "white",
+                  }}
+                  aria-label={isBulkMode ? "Exit bulk mode" : "Enter bulk mode"}
+                >
+                  <i
+                    className={`fas fa-${isBulkMode ? "check-square" : "square"} mr-2`}
+                  ></i>
+                  {isBulkMode ? "Exit Bulk Mode" : "Bulk Select"}
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setIsHighContrast(!isHighContrast);
+                    setIsQuickActionsMenuOpen(false);
+                  }}
+                  className="btn-modal"
+                  style={{
+                    width: "100%",
+                    justifyContent: "center",
+                    background: isHighContrast ? "#10b981" : "#6b7280",
+                    color: "white",
+                  }}
+                  aria-label={
+                    isHighContrast
+                      ? "Disable high contrast"
+                      : "Enable high contrast"
+                  }
+                >
+                  <i className="fas fa-adjust mr-2"></i>
+                  {isHighContrast ? "High Contrast: ON" : "High Contrast: OFF"}
+                </button>
+              </div>
+            )}
 
             <div
               style={{
@@ -8041,20 +9682,9 @@ const BookPages = ({
                 flexDirection: "column",
                 alignItems: "center",
                 justifyContent: "center",
-                height: "60%",
-                marginBottom: "30px",
+                height: "80%",
               }}
             >
-              {/* <button
-                onClick={() => {
-                  console.log("Add Recipe clicked");
-                  onOpenAddRecipe();
-                }}
-                className="add-recipe-btn-large"
-              >
-                <i className="fas fa-plus-circle"></i>
-                <span>New Recipe</span>
-              </button> */}
               <p
                 style={{
                   marginTop: "20px",
@@ -8109,126 +9739,9 @@ const BookPages = ({
                 </button>
               </div>
             </div>
-
-            <div
-              style={{
-                padding: "20px",
-                background: "#1503af33",
-                borderRadius: "12px",
-                border: "1px solid #1503afad",
-              }}
-            >
-              <h3
-                style={{
-                  fontSize: "18px",
-                  fontWeight: "bold",
-                  marginBottom: "12px",
-                  color: "#f3f4f6",
-                  borderBottom: "2px solid #1503afad",
-                  paddingBottom: "8px",
-                }}
-              >
-                Quick Actions
-              </h3>
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "10px",
-                }}
-              >
-                <button
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    console.log("Meal Plan clicked");
-                    setShowMealPlanModal(true);
-                  }}
-                  className="btn-modal btn-blue"
-                  style={{ width: "100%", justifyContent: "center" }}
-                >
-                  <i className="fas fa-calendar-alt mr-2"></i> Meal Plan
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    console.log("Shopping List clicked");
-                    setShowShoppingListModal(true);
-                  }}
-                  className="btn-modal bg-purple-500 hover:bg-purple-600 text-white"
-                  style={{ width: "100%", justifyContent: "center" }}
-                >
-                  <i className="fas fa-shopping-cart mr-2"></i> Shopping List
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    console.log("Inventory clicked");
-                    setShowInventoryModal(true);
-                  }}
-                  className="btn-modal"
-                  style={{
-                    width: "100%",
-                    justifyContent: "center",
-                    background: "#f97316",
-                    color: "white",
-                  }}
-                >
-                  <i className="fas fa-box mr-2"></i> Ingredient Inventory
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    console.log("Collections clicked");
-                    setShowCollectionsModal(true);
-                  }}
-                  className="btn-modal"
-                  style={{
-                    width: "100%",
-                    justifyContent: "center",
-                    background: "#14b8a6",
-                    color: "white",
-                  }}
-                >
-                  <i className="fas fa-folder mr-2"></i> Collections
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    console.log("Analytics clicked");
-                    setShowAnalyticsModal(true);
-                  }}
-                  className="btn-modal"
-                  style={{
-                    width: "100%",
-                    justifyContent: "center",
-                    background: "#6366f1",
-                    color: "white",
-                  }}
-                >
-                  <i className="fas fa-chart-line mr-2"></i> Analytics & Stats
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    console.log("Export clicked");
-                    exportRecipes();
-                  }}
-                  className="btn-modal btn-green"
-                  style={{ width: "100%", justifyContent: "center" }}
-                >
-                  <i className="fas fa-file-export mr-2"></i> Export Recipes
-                </button>
-              </div>
-            </div>
           </div>
         </div>
-      </>
+      </div>
     );
   }
 
@@ -8239,46 +9752,8 @@ const BookPages = ({
     const recipe = recipes[recipeIndex];
 
     return (
-      <>
-        {/* <button
-          onClick={handlePrevPageWithEffect}
-          disabled={currentPage === 0 || isPageTurning}
-          className="nav-arrow prev"
-        >
-          <i className="fas fa-chevron-left"></i>
-        </button> */}
-
-        {/* <button
-          onClick={handleNextPageWithEffect}
-          disabled={currentPage >= totalPages - 1 || isPageTurning}
-          className="nav-arrow next"
-        >
-          <i className="fas fa-chevron-right"></i>
-        </button> */}
-
-        {isPageTurning && useThreeJS && window.THREE && (
-          <ThreeJSPageTurn
-            currentPageContent={null}
-            nextPageContent={null}
-            onTurnComplete={onTurnComplete}
-            direction={turnDirection}
-            canvasWidth={1200}
-            canvasHeight={700}
-          />
-        )}
-
-        <div
-          className={`page-spread ${isFading ? "page-fade-out" : "page-fade-in"}`}
-          ref={pageSpreadRef}
-          style={{
-            transition: "transform 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
-            transform: isPageTurning
-              ? turnDirection === "forward"
-                ? "translateX(-20px)"
-                : "translateX(20px)"
-              : "translateX(0)",
-          }}
-        >
+      <div className="pages-container" ref={pagesContainerRef}>
+        <div className="page-spread" ref={pageSpreadRef}>
           {/* Left page: Recipe image */}
           <div
             className="page left-page recipe-image-page"
@@ -8497,13 +9972,8 @@ const BookPages = ({
                 onClick={async (e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  const qrDataUrl = await generateQRCode(
-                    JSON.stringify({
-                      id: recipe.id,
-                      name: recipe.name,
-                      url: window.location.href,
-                    }),
-                  );
+                  // Pass the full recipe object instead of just id, name, url
+                  const qrDataUrl = await generateQRCode(recipe);
                   const qrWindow = window.open(
                     "",
                     "_blank",
@@ -8750,7 +10220,7 @@ const BookPages = ({
             </div>
           </div>
         )}
-      </>
+      </div>
     );
   }
 
@@ -8759,16 +10229,17 @@ const BookPages = ({
 
 const CoverEditorModal = ({ title, image, onSave, onClose }) => {
   const [newTitle, setNewTitle] = useState(title);
-  const [newImage, setNewImage] = useState(image);
-  const [imagePreview, setImagePreview] = useState(image);
+  const [newImage, setNewImage] = useState(image || null);
+  const [imagePreview, setImagePreview] = useState(image || null);
 
   const handleImageChange = (e) => {
     const file = e.target.files[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = (event) => {
-        setNewImage(event.target.result);
-        setImagePreview(event.target.result);
+        const imageData = event.target.result;
+        setNewImage(imageData);
+        setImagePreview(imageData);
       };
       reader.readAsDataURL(file);
     }
@@ -8823,7 +10294,10 @@ const CoverEditorModal = ({ title, image, onSave, onClose }) => {
             Cancel
           </button>
           <button
-            onClick={() => onSave(newTitle, newImage)}
+            onClick={() => {
+              // Always save the current state (newImage might be null if no image selected)
+              onSave(newTitle, newImage);
+            }}
             className="btn-modal btn-green"
           >
             Save Changes
@@ -8890,6 +10364,8 @@ const CookingModeModal = ({
   const [showTimerAlert, setShowTimerAlert] = useState(false); // Show alert when timer completes
   const voiceControlRef = useRef(null);
   const stepTimerRef = useRef(null);
+  const autoReadTimeoutRef = useRef(null);
+  const lastReadStepRef = useRef(-1); // Track last step that was auto-read
 
   const steps = recipe.directions || [];
   const totalSteps = steps.length;
@@ -8914,6 +10390,14 @@ const CookingModeModal = ({
       if (voiceControlRef.current) {
         voiceControlRef.current.stop();
       }
+      if (stepTimerRef.current) {
+        clearTimeout(stepTimerRef.current);
+      }
+      if (autoReadTimeoutRef.current) {
+        clearTimeout(autoReadTimeoutRef.current);
+      }
+      stopTimerSound();
+      window.speechSynthesis.cancel();
     };
   }, []);
 
@@ -8979,18 +10463,25 @@ const CookingModeModal = ({
 
   const handleStepComplete = () => {
     setCompletedSteps((prev) => new Set([...prev, currentStep]));
+
+    // Stop any ongoing TTS
+    window.speechSynthesis.cancel();
+    setIsReading(false);
+    setWaitingForTimer(false);
+
     if (currentStep < totalSteps - 1) {
       setCurrentStep((prev) => prev + 1);
     } else {
-      // On last step, clicking Complete Recipe loops back to beginning
-      setCurrentStep(0);
-      setCompletedSteps(new Set()); // Clear completed steps
-      addToast("Recipe complete! Returning to first step", "success");
+      // At last step, just mark as complete without looping
+      addToast("All steps complete!", "success");
     }
   };
 
   const handleComplete = () => {
     if (window.confirm("Mark this cooking session as complete?")) {
+      window.speechSynthesis.cancel();
+      setIsReading(false);
+      stopTimerSound();
       onClose(true);
     }
   };
@@ -9000,6 +10491,11 @@ const CookingModeModal = ({
       window.speechSynthesis.cancel();
       setIsReading(false);
       setWaitingForTimer(false);
+      return;
+    }
+
+    // Don't read if past the last step
+    if (currentStep >= totalSteps) {
       return;
     }
 
@@ -9120,10 +10616,51 @@ const CookingModeModal = ({
 
   // Auto-read when step changes if auto-read is enabled
   useEffect(() => {
-    if (autoReadEnabled && !isReading) {
-      handleReadStep();
+    // Skip if this step was already auto-read
+    if (lastReadStepRef.current === currentStep) {
+      return;
     }
-  }, [currentStep, autoReadEnabled]);
+
+    // Clear any pending auto-read
+    if (autoReadTimeoutRef.current) {
+      clearTimeout(autoReadTimeoutRef.current);
+    }
+
+    // Only auto-read if within valid step range and auto-read is enabled
+    if (
+      autoReadEnabled &&
+      !isReading &&
+      !waitingForTimer &&
+      !showTimerAlert &&
+      currentStep < totalSteps
+    ) {
+      // Delay to ensure state is settled and TTS is ready
+      autoReadTimeoutRef.current = setTimeout(() => {
+        // Double-check conditions before reading
+        if (
+          autoReadEnabled &&
+          !isReading &&
+          currentStep < totalSteps &&
+          lastReadStepRef.current !== currentStep
+        ) {
+          lastReadStepRef.current = currentStep;
+          handleReadStep();
+        }
+      }, 300);
+    }
+
+    return () => {
+      if (autoReadTimeoutRef.current) {
+        clearTimeout(autoReadTimeoutRef.current);
+      }
+    };
+  }, [
+    currentStep,
+    autoReadEnabled,
+    isReading,
+    waitingForTimer,
+    showTimerAlert,
+  ]);
 
   const progress = ((currentStep + 1) / totalSteps) * 100;
 
@@ -9174,14 +10711,17 @@ const CookingModeModal = ({
 
         <div className="flex-grow overflow-y-auto p-6">
           <div className="max-w-2xl mx-auto">
-            <div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-6 rounded-lg mb-6">
+            <div
+              className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-6 rounded-lg mb-6"
+              key={currentStep}
+            >
               <div className="flex items-start gap-4">
                 <div className="flex-shrink-0 w-12 h-12 bg-blue-500 text-white rounded-full flex items-center justify-center font-bold text-xl">
                   {currentStep + 1}
                 </div>
                 <div className="flex-grow">
                   <p className="text-xl text-gray-900 dark:text-white leading-relaxed">
-                    {steps[currentStep]}
+                    {steps[currentStep] || ""}
                   </p>
                 </div>
               </div>
@@ -9343,6 +10883,7 @@ const CookingModeModal = ({
                 e.preventDefault();
                 handleStepComplete();
               }}
+              disabled={currentStep >= totalSteps}
               className="btn-modal btn-green"
             >
               <i className="fas fa-check mr-2"></i>
@@ -9411,12 +10952,14 @@ const InventoryModal = ({
   addInventoryItem,
   updateInventoryItem,
   deleteInventoryItem,
+  clearAllInventory,
   checkRecipeAvailability,
   recipes,
   onClose,
   addToast,
 }) => {
   const [showAddForm, setShowAddForm] = useState(false);
+  const [editingItem, setEditingItem] = useState(null);
   const [formData, setFormData] = useState({
     name: "",
     quantity: 1,
@@ -9445,7 +10988,14 @@ const InventoryModal = ({
       addToast("Please enter an item name", "error");
       return;
     }
-    await addInventoryItem(formData);
+
+    if (editingItem) {
+      await updateInventoryItem(editingItem.id, formData);
+      setEditingItem(null);
+    } else {
+      await addInventoryItem(formData);
+    }
+
     setFormData({
       name: "",
       quantity: 1,
@@ -9456,6 +11006,31 @@ const InventoryModal = ({
       notes: "",
     });
     setShowAddForm(false);
+  };
+
+  const handleEdit = (item) => {
+    setEditingItem(item);
+    setFormData({
+      name: item.name,
+      quantity: item.quantity,
+      unit: item.unit,
+      category: item.category,
+      expirationDate: item.expirationDate || "",
+      location: item.location,
+      notes: item.notes || "",
+    });
+    setShowAddForm(true);
+  };
+
+  const handleClearAll = async () => {
+    if (
+      window.confirm(
+        `Are you sure you want to clear all ${inventory.length} items from inventory? This cannot be undone.`,
+      )
+    ) {
+      // Clear all items at once
+      await clearAllInventory();
+    }
   };
 
   const handleDelete = async (id) => {
@@ -9497,9 +11072,17 @@ const InventoryModal = ({
               make
             </p>
           </div>
-          <button onClick={onClose} className="btn-modal btn-gray">
-            <i className="fas fa-times"></i>
-          </button>
+          <div className="flex items-center gap-2">
+            {inventory.length > 0 && (
+              <button onClick={handleClearAll} className="btn-modal btn-red">
+                <i className="fas fa-trash-alt mr-2"></i>
+                Clear All
+              </button>
+            )}
+            <button onClick={onClose} className="btn-modal btn-gray">
+              <i className="fas fa-times"></i>
+            </button>
+          </div>
         </div>
 
         {expiringSoon.length > 0 && (
@@ -9534,7 +11117,10 @@ const InventoryModal = ({
         <div className="flex-grow overflow-y-auto p-4">
           {!showAddForm && (
             <button
-              onClick={() => setShowAddForm(true)}
+              onClick={() => {
+                setShowAddForm(true);
+                setEditingItem(null);
+              }}
               className="w-full btn-modal btn-green mb-4"
             >
               <i className="fas fa-plus mr-2"></i>
@@ -9547,6 +11133,9 @@ const InventoryModal = ({
               onSubmit={handleSubmit}
               className="bg-gray-50 dark:bg-gray-900 rounded-lg p-4 mb-4"
             >
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">
+                {editingItem ? "Edit Item" : "Add New Item"}
+              </h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <input
                   type="text"
@@ -9630,12 +11219,26 @@ const InventoryModal = ({
               </div>
               <div className="flex gap-2 mt-3">
                 <button type="submit" className="btn-modal btn-green">
-                  <i className="fas fa-plus mr-2"></i>
-                  Add Item
+                  <i
+                    className={`fas fa-${editingItem ? "save" : "plus"} mr-2`}
+                  ></i>
+                  {editingItem ? "Save Changes" : "Add Item"}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowAddForm(false)}
+                  onClick={() => {
+                    setShowAddForm(false);
+                    setEditingItem(null);
+                    setFormData({
+                      name: "",
+                      quantity: 1,
+                      unit: "",
+                      category: "Pantry",
+                      expirationDate: "",
+                      location: "Pantry",
+                      notes: "",
+                    });
+                  }}
                   className="btn-modal btn-gray"
                 >
                   Cancel
@@ -9686,12 +11289,22 @@ const InventoryModal = ({
                           {item.quantity} {item.unit}
                         </p>
                       </div>
-                      <button
-                        onClick={() => handleDelete(item.id)}
-                        className="text-red-500 hover:text-red-700 text-sm"
-                      >
-                        <i className="fas fa-trash"></i>
-                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleEdit(item)}
+                          className="text-blue-500 hover:text-blue-700 text-sm"
+                          title="Edit item"
+                        >
+                          <i className="fas fa-edit"></i>
+                        </button>
+                        <button
+                          onClick={() => handleDelete(item.id)}
+                          className="text-red-500 hover:text-red-700 text-sm"
+                          title="Delete item"
+                        >
+                          <i className="fas fa-trash"></i>
+                        </button>
+                      </div>
                     </div>
                     <div className="text-xs text-gray-500 dark:text-gray-400 space-y-1">
                       <p>📍 {item.location}</p>
@@ -9725,10 +11338,10 @@ const InventoryModal = ({
           {canMakeRecipes.length > 0 && (
             <div className="mt-6">
               <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">
-                ✨ Recipes You Can Make Now
+                ✨ Recipes You Can Make Now ({canMakeRecipes.length})
               </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {canMakeRecipes.slice(0, 6).map((recipe) => (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-96 overflow-y-auto">
+                {canMakeRecipes.map((recipe) => (
                   <div
                     key={recipe.id}
                     className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-3"
@@ -9742,11 +11355,6 @@ const InventoryModal = ({
                   </div>
                 ))}
               </div>
-              {canMakeRecipes.length > 6 && (
-                <p className="text-sm text-gray-600 dark:text-gray-400 mt-2">
-                  ...and {canMakeRecipes.length - 6} more recipes
-                </p>
-              )}
             </div>
           )}
         </div>
@@ -9766,12 +11374,14 @@ const CollectionsModal = ({
   openRecipeDetails,
   onClose,
   addToast,
+  selectedRecipes = [],
 }) => {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newCollectionName, setNewCollectionName] = useState("");
   const [newCollectionDesc, setNewCollectionDesc] = useState("");
   const [selectedCollection, setSelectedCollection] = useState(null);
   const [showAddRecipes, setShowAddRecipes] = useState(false);
+  const [bulkAddMode, setBulkAddMode] = useState(selectedRecipes.length > 0);
 
   const handleCreate = async (e) => {
     e.preventDefault();
@@ -9803,6 +11413,20 @@ const CollectionsModal = ({
         ...prev,
         recipeIds: [...prev.recipeIds, recipeId],
       }));
+    }
+  };
+
+  const handleBulkAddRecipes = async (collectionId) => {
+    if (selectedRecipes.length > 0) {
+      for (const recipeId of selectedRecipes) {
+        await addRecipeToCollection(collectionId, recipeId);
+      }
+      const collection = collections.find((c) => c.id === collectionId);
+      addToast(
+        `Added ${selectedRecipes.length} recipes to ${collection?.name || "collection"}`,
+        "success",
+      );
+      onClose();
     }
   };
 
@@ -9889,6 +11513,15 @@ const CollectionsModal = ({
               </div>
             ) : (
               <div className="space-y-2">
+                {bulkAddMode && (
+                  <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-lg p-3 mb-3">
+                    <p className="text-sm font-semibold text-blue-700 dark:text-blue-300">
+                      <i className="fas fa-info-circle mr-2"></i>
+                      Select a collection to add {selectedRecipes.length} recipe
+                      {selectedRecipes.length !== 1 ? "s" : ""}
+                    </p>
+                  </div>
+                )}
                 {collections.map((collection) => (
                   <div
                     key={collection.id}
@@ -9897,7 +11530,13 @@ const CollectionsModal = ({
                         ? "border-green-500 bg-green-50 dark:bg-green-900/20"
                         : "border-gray-200 dark:border-gray-600 hover:border-green-300"
                     }`}
-                    onClick={() => setSelectedCollection(collection)}
+                    onClick={() => {
+                      if (bulkAddMode) {
+                        handleBulkAddRecipes(collection.id);
+                      } else {
+                        setSelectedCollection(collection);
+                      }
+                    }}
                   >
                     <div className="flex justify-between items-start">
                       <div className="flex-grow">
@@ -10245,10 +11884,1210 @@ const AnalyticsModal = ({ recipes, cookingSessions, ratings, onClose }) => {
   );
 };
 
+// ===== FEATURE 11: RECIPE SUGGESTIONS MODAL =====
+const RecipeSuggestionsModal = ({
+  recipes,
+  inventory,
+  onClose,
+  openRecipeDetails,
+  addToast,
+}) => {
+  const [expandedRecipes, setExpandedRecipes] = useState({});
+
+  const suggestions = useMemo(() => {
+    return getRecipeSuggestions(recipes, inventory, 10);
+  }, [recipes, inventory]);
+
+  const getMissingIngredients = useCallback(
+    (recipe) => {
+      const inventoryNames = inventory.map((item) => item.name.toLowerCase());
+      return recipe.ingredients.filter((ing) => {
+        const normalized = normalizeIngredient(ing).toLowerCase();
+        return !inventoryNames.some(
+          (invName) =>
+            invName.includes(normalized) || normalized.includes(invName),
+        );
+      });
+    },
+    [inventory],
+  );
+
+  return (
+    <div
+      className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4"
+      role="dialog"
+      aria-labelledby="suggestions-modal-title"
+      aria-modal="true"
+    >
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto modal-scale-enter">
+        <div className="flex justify-between items-center mb-4 border-b border-gray-200 dark:border-gray-600 pb-3">
+          <h2
+            id="suggestions-modal-title"
+            className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2"
+          >
+            <i className="fas fa-lightbulb text-yellow-500"></i>
+            Recipe Suggestions
+          </h2>
+          <button
+            onClick={onClose}
+            className="text-gray-500 hover:text-red-500 text-3xl"
+            aria-label="Close"
+          >
+            &times;
+          </button>
+        </div>
+
+        {suggestions.length === 0 ? (
+          <EmptyState
+            icon="fa-shopping-basket"
+            title="No Suggestions Yet"
+            description="Add items to your inventory to get personalized recipe suggestions based on what you have!"
+          />
+        ) : (
+          <div className="space-y-4">
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              Based on your inventory, here are recipes you can make:
+            </p>
+            {suggestions.map((suggestion, idx) => {
+              const missingIngredients = getMissingIngredients(
+                suggestion.recipe,
+              );
+              const isExpanded = expandedRecipes[suggestion.recipe.id];
+
+              return (
+                <div
+                  key={suggestion.recipe.id}
+                  className="bg-gradient-to-r from-green-50 to-blue-50 dark:from-green-900/20 dark:to-blue-900/20 rounded-lg p-4 hover-lift"
+                >
+                  <div
+                    className="flex justify-between items-start cursor-pointer"
+                    onClick={() => {
+                      openRecipeDetails(suggestion.recipe);
+                      onClose();
+                    }}
+                  >
+                    <div className="flex-1">
+                      <h3 className="font-bold text-lg text-gray-900 dark:text-white flex items-center gap-2">
+                        {suggestion.recipe.name}
+                        {suggestion.matchPercent === 100 && (
+                          <span className="badge-new">100% Match!</span>
+                        )}
+                      </h3>
+                      <div className="mt-2">
+                        <div className="progress-bar">
+                          <div
+                            className="progress-fill"
+                            style={{ width: `${suggestion.matchPercent}%` }}
+                          ></div>
+                        </div>
+                        <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                          {suggestion.matchingCount} of{" "}
+                          {suggestion.recipe.ingredients.length} ingredients
+                          available ({Math.round(suggestion.matchPercent)}%)
+                        </p>
+                      </div>
+                    </div>
+                    <i className="fas fa-chevron-right text-gray-400 ml-4"></i>
+                  </div>
+
+                  {suggestion.missingCount > 0 && (
+                    <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-600">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setExpandedRecipes((prev) => ({
+                            ...prev,
+                            [suggestion.recipe.id]: !prev[suggestion.recipe.id],
+                          }));
+                        }}
+                        className="flex items-center gap-2 text-sm text-orange-600 dark:text-orange-400 hover:text-orange-700 font-medium"
+                      >
+                        <i
+                          className={`fas fa-chevron-${isExpanded ? "up" : "down"}`}
+                        ></i>
+                        Missing {suggestion.missingCount} ingredient
+                        {suggestion.missingCount > 1 ? "s" : ""}
+                      </button>
+
+                      {isExpanded && (
+                        <ul className="mt-2 space-y-1 ml-6">
+                          {missingIngredients.map((ing, idx) => (
+                            <li
+                              key={idx}
+                              className="text-sm text-gray-700 dark:text-gray-300 flex items-start gap-2"
+                            >
+                              <i className="fas fa-times-circle text-red-500 mt-0.5"></i>
+                              <span>{ing}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="mt-6 pt-4 border-t border-gray-200 dark:border-gray-600 flex justify-end">
+          <button onClick={onClose} className="btn-modal btn-gray">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ===== FEATURE 21: MEAL PREP MODE MODAL =====
+const MealPrepModal = ({
+  recipes,
+  selectedRecipes,
+  onClose,
+  addToShoppingList,
+  addToast,
+}) => {
+  const [selectedForPrep, setSelectedForPrep] = useState(selectedRecipes || []);
+  const [batchMultiplier, setBatchMultiplier] = useState(1);
+
+  const consolidatedIngredients = useMemo(() => {
+    const ingredientMap = {};
+
+    selectedForPrep.forEach((recipeId) => {
+      const recipe = recipes.find((r) => r.id === recipeId);
+      if (!recipe) return;
+
+      recipe.ingredients.forEach((ing) => {
+        const normalized = normalizeIngredient(ing);
+        const { quantity, unit, description } = parseIngredient(ing);
+
+        if (!ingredientMap[normalized]) {
+          ingredientMap[normalized] = {
+            description,
+            unit,
+            totalQuantity: 0,
+            recipes: [],
+          };
+        }
+
+        if (quantity) {
+          ingredientMap[normalized].totalQuantity += quantity * batchMultiplier;
+        }
+        ingredientMap[normalized].recipes.push(recipe.name);
+      });
+    });
+
+    return Object.entries(ingredientMap).map(([key, data]) => ({
+      normalized: key,
+      ...data,
+    }));
+  }, [selectedForPrep, recipes, batchMultiplier]);
+
+  const handleAddAllToShoppingList = () => {
+    selectedForPrep.forEach((id) => addToShoppingList(id));
+    addToast(
+      `Added ingredients from ${selectedForPrep.length} recipes to shopping list`,
+      "success",
+    );
+    onClose();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4"
+      role="dialog"
+      aria-labelledby="meal-prep-modal-title"
+      aria-modal="true"
+    >
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto modal-scale-enter">
+        <div className="flex justify-between items-center mb-4 border-b border-gray-200 dark:border-gray-600 pb-3">
+          <h2
+            id="meal-prep-modal-title"
+            className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2"
+          >
+            <i className="fas fa-calendar-check text-purple-500"></i>
+            Meal Prep Planner
+          </h2>
+          <button
+            onClick={onClose}
+            className="text-gray-500 hover:text-red-500 text-3xl"
+            aria-label="Close"
+          >
+            &times;
+          </button>
+        </div>
+
+        <div className="mb-4">
+          <label className="block text-sm font-medium mb-2 text-gray-700 dark:text-gray-300">
+            Batch Multiplier (make multiple servings):
+          </label>
+          <input
+            type="number"
+            min="1"
+            value={batchMultiplier}
+            onChange={(e) =>
+              setBatchMultiplier(Math.max(1, parseInt(e.target.value) || 1))
+            }
+            className="modal-input w-32"
+          />
+        </div>
+
+        {selectedForPrep.length === 0 ? (
+          <EmptyState
+            icon="fa-calendar"
+            title="No Recipes Selected"
+            description="Select recipes from your collection to plan your meal prep!"
+          />
+        ) : (
+          <>
+            <div className="mb-6">
+              <h3 className="text-lg font-semibold mb-3 text-gray-900 dark:text-white">
+                Selected Recipes ({selectedForPrep.length})
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {selectedForPrep.map((recipeId) => {
+                  const recipe = recipes.find((r) => r.id === recipeId);
+                  return recipe ? (
+                    <div
+                      key={recipeId}
+                      className="bg-gray-50 dark:bg-gray-900 rounded-lg p-3 flex justify-between items-center"
+                    >
+                      <span className="font-medium text-gray-900 dark:text-white">
+                        {recipe.name}
+                      </span>
+                      <button
+                        onClick={() =>
+                          setSelectedForPrep((prev) =>
+                            prev.filter((id) => id !== recipeId),
+                          )
+                        }
+                        className="text-red-500 hover:text-red-700"
+                      >
+                        <i className="fas fa-times"></i>
+                      </button>
+                    </div>
+                  ) : null;
+                })}
+              </div>
+            </div>
+
+            <div className="mb-6">
+              <h3 className="text-lg font-semibold mb-3 text-gray-900 dark:text-white">
+                Consolidated Shopping List (×{batchMultiplier})
+              </h3>
+              <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-4 max-h-96 overflow-y-auto">
+                {consolidatedIngredients.map((ing, idx) => (
+                  <div
+                    key={idx}
+                    className="flex justify-between items-start py-2 border-b border-gray-200 dark:border-gray-700 last:border-0"
+                  >
+                    <div className="flex-1">
+                      <p className="font-medium text-gray-900 dark:text-white">
+                        {ing.totalQuantity > 0 &&
+                          `${formatQuantity(ing.totalQuantity)} `}
+                        {ing.unit && `${ing.unit} `}
+                        {ing.description}
+                      </p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        Used in: {ing.recipes.join(", ")}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-4 border-t border-gray-200 dark:border-gray-600">
+              <button onClick={onClose} className="btn-modal btn-gray">
+                Close
+              </button>
+              <button
+                onClick={handleAddAllToShoppingList}
+                className="btn-modal btn-green"
+              >
+                <i className="fas fa-cart-plus mr-2"></i>
+                Add All to Shopping List
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ===== FEATURE 25: NUTRITION GOALS DASHBOARD MODAL =====
+const NutritionGoalsModal = ({
+  recipes,
+  cookingSessions,
+  nutritionGoals,
+  setNutritionGoals,
+  onClose,
+  addToast,
+}) => {
+  const [goals, setGoals] = useState(nutritionGoals);
+  const [selectedPeriod, setSelectedPeriod] = useState("daily"); // daily, weekly
+
+  const todaysNutrition = useMemo(() => {
+    const today = new Date().toISOString().split("T")[0];
+    const todaysSessions = cookingSessions.filter((session) => {
+      const sessionDate = new Date(session.completedAt)
+        .toISOString()
+        .split("T")[0];
+      return sessionDate === today && session.completed;
+    });
+
+    let totalCals = 0,
+      totalProtein = 0,
+      totalCarbs = 0,
+      totalFat = 0;
+
+    todaysSessions.forEach((session) => {
+      const recipe = recipes.find((r) => r.id === session.recipeId);
+      if (recipe) {
+        totalCals += recipe.calories || 0;
+        totalProtein += recipe.protein || 0;
+        totalCarbs += recipe.carbs || 0;
+        totalFat += recipe.fat || 0;
+      }
+    });
+
+    return {
+      calories: totalCals,
+      protein: totalProtein,
+      carbs: totalCarbs,
+      fat: totalFat,
+    };
+  }, [cookingSessions, recipes]);
+
+  const handleSaveGoals = async () => {
+    await setNutritionGoals(goals);
+    addToast("Nutrition goals updated!", "success");
+    onClose();
+  };
+
+  const getProgressColor = (current, goal) => {
+    const percent = (current / goal) * 100;
+    if (percent >= 100) return "bg-red-500";
+    if (percent >= 80) return "bg-yellow-500";
+    return "bg-green-500";
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4"
+      role="dialog"
+      aria-labelledby="nutrition-goals-modal-title"
+      aria-modal="true"
+    >
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto modal-scale-enter">
+        <div className="flex justify-between items-center mb-6 border-b border-gray-200 dark:border-gray-600 pb-3">
+          <h2
+            id="nutrition-goals-modal-title"
+            className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2"
+          >
+            <i className="fas fa-chart-pie text-green-500"></i>
+            Nutrition Goals Dashboard
+          </h2>
+          <button
+            onClick={onClose}
+            className="text-gray-500 hover:text-red-500 text-3xl"
+            aria-label="Close"
+          >
+            &times;
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+          <div>
+            <h3 className="text-lg font-semibold mb-4 text-gray-900 dark:text-white">
+              Daily Goals
+            </h3>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">
+                  Calories
+                </label>
+                <input
+                  type="number"
+                  value={goals.dailyCalories}
+                  onChange={(e) =>
+                    setGoals({
+                      ...goals,
+                      dailyCalories: parseInt(e.target.value) || 0,
+                    })
+                  }
+                  className="modal-input"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">
+                  Protein (g)
+                </label>
+                <input
+                  type="number"
+                  value={goals.dailyProtein}
+                  onChange={(e) =>
+                    setGoals({
+                      ...goals,
+                      dailyProtein: parseInt(e.target.value) || 0,
+                    })
+                  }
+                  className="modal-input"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">
+                  Carbs (g)
+                </label>
+                <input
+                  type="number"
+                  value={goals.dailyCarbs}
+                  onChange={(e) =>
+                    setGoals({
+                      ...goals,
+                      dailyCarbs: parseInt(e.target.value) || 0,
+                    })
+                  }
+                  className="modal-input"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">
+                  Fat (g)
+                </label>
+                <input
+                  type="number"
+                  value={goals.dailyFat}
+                  onChange={(e) =>
+                    setGoals({
+                      ...goals,
+                      dailyFat: parseInt(e.target.value) || 0,
+                    })
+                  }
+                  className="modal-input"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <h3 className="text-lg font-semibold mb-4 text-gray-900 dark:text-white">
+              Today's Progress
+            </h3>
+            <div className="space-y-4">
+              {["calories", "protein", "carbs", "fat"].map((nutrient) => {
+                const current = todaysNutrition[nutrient];
+                const goal =
+                  goals[`daily${capitalizeFirstLetter(nutrient)}`] || 1;
+                const percent = Math.min((current / goal) * 100, 100);
+
+                return (
+                  <div key={nutrient}>
+                    <div className="flex justify-between text-sm mb-1">
+                      <span className="font-medium text-gray-700 dark:text-gray-300">
+                        {capitalizeFirstLetter(nutrient)}
+                      </span>
+                      <span className="text-gray-600 dark:text-gray-400">
+                        {current} / {goal} {nutrient !== "calories" && "g"}
+                      </span>
+                    </div>
+                    <div className="progress-bar">
+                      <div
+                        className={`progress-fill ${getProgressColor(current, goal)}`}
+                        style={{ width: `${percent}%` }}
+                      ></div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-3 pt-4 border-t border-gray-200 dark:border-gray-600">
+          <button onClick={onClose} className="btn-modal btn-gray">
+            Cancel
+          </button>
+          <button onClick={handleSaveGoals} className="btn-modal btn-green">
+            <i className="fas fa-save mr-2"></i>
+            Save Goals
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ===== FEATURE 29: BULK OPERATIONS TOOLBAR =====
+const BulkOperationsToolbar = ({
+  selectedCount,
+  onDelete,
+  onAddToCollection,
+  onExport,
+  onCancel,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
+}) => {
+  if (selectedCount === 0) return null;
+
+  return (
+    <div
+      className="fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-600 p-4 shadow-lg z-50 glass-morphism"
+      role="toolbar"
+      aria-label="Bulk recipe operations"
+    >
+      <div className="max-w-7xl mx-auto flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3">
+          <span
+            className="font-semibold text-gray-900 dark:text-white"
+            role="status"
+            aria-live="polite"
+          >
+            {selectedCount} selected
+          </span>
+          <button
+            onClick={onCancel}
+            className="btn-modal btn-gray text-sm"
+            aria-label="Cancel bulk selection"
+          >
+            <i className="fas fa-times mr-2"></i>
+            Cancel
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={onUndo}
+            disabled={!canUndo}
+            className="btn-modal btn-gray text-sm"
+            title="Undo (Ctrl+Z)"
+            aria-label="Undo last action"
+          >
+            <i className="fas fa-undo"></i>
+          </button>
+          <button
+            onClick={onRedo}
+            disabled={!canRedo}
+            className="btn-modal btn-gray text-sm"
+            title="Redo (Ctrl+Shift+Z)"
+            aria-label="Redo last action"
+          >
+            <i className="fas fa-redo"></i>
+          </button>
+          <button
+            onClick={onAddToCollection}
+            className="btn-modal btn-blue text-sm"
+            aria-label={`Add ${selectedCount} recipes to collection`}
+          >
+            <i className="fas fa-folder-plus mr-2"></i>
+            Add to Collection
+          </button>
+          <button
+            onClick={onExport}
+            className="btn-modal btn-orange text-sm"
+            aria-label={`Export ${selectedCount} selected recipes`}
+          >
+            <i className="fas fa-download mr-2"></i>
+            Export Selected
+          </button>
+          <button
+            onClick={onDelete}
+            className="btn-modal btn-red text-sm"
+            aria-label={`Delete ${selectedCount} selected recipes`}
+          >
+            <i className="fas fa-trash mr-2"></i>
+            Delete Selected
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ===== FEATURE 13: SUBSTITUTIONS MODAL =====
+const SubstitutionsModal = ({ ingredient, onClose }) => {
+  const substitutions = findSubstitutions(ingredient);
+
+  return (
+    <div
+      className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-[70] p-4"
+      role="dialog"
+      aria-labelledby="substitutions-modal-title"
+      aria-modal="true"
+    >
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-md modal-scale-enter">
+        <div className="flex justify-between items-center mb-4 border-b border-gray-200 dark:border-gray-600 pb-3">
+          <h3
+            id="substitutions-modal-title"
+            className="text-xl font-bold text-gray-900 dark:text-white"
+          >
+            Substitutions
+          </h3>
+          <button
+            onClick={onClose}
+            className="text-gray-500 hover:text-red-500 text-2xl"
+            aria-label="Close"
+          >
+            &times;
+          </button>
+        </div>
+
+        {!substitutions ? (
+          <div className="text-center py-6">
+            <i className="fas fa-info-circle text-4xl text-gray-400 mb-3"></i>
+            <p className="text-gray-600 dark:text-gray-400">
+              No substitutions found for "{ingredient}"
+            </p>
+          </div>
+        ) : (
+          <div>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+              You can substitute <strong>{substitutions.ingredient}</strong>{" "}
+              with:
+            </p>
+            <ul className="space-y-2">
+              {substitutions.substitutes.map((sub, idx) => (
+                <li
+                  key={idx}
+                  className="flex items-start gap-2 p-3 bg-green-50 dark:bg-green-900/20 rounded-lg"
+                >
+                  <i className="fas fa-check-circle text-green-500 mt-1"></i>
+                  <span className="text-gray-800 dark:text-gray-200">
+                    {sub}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div className="mt-6 flex justify-end">
+          <button onClick={onClose} className="btn-modal btn-gray">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ===== FEATURE 23: PHOTO GALLERY =====
+const PhotoGalleryModal = ({ photos, currentIndex, onClose, onNavigate }) => {
+  const [index, setIndex] = useState(currentIndex || 0);
+
+  useEffect(() => {
+    const handleKeyPress = (e) => {
+      if (e.key === "ArrowLeft" && index > 0) {
+        setIndex(index - 1);
+      } else if (e.key === "ArrowRight" && index < photos.length - 1) {
+        setIndex(index + 1);
+      } else if (e.key === "Escape") {
+        onClose();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyPress);
+    return () => window.removeEventListener("keydown", handleKeyPress);
+  }, [index, photos.length, onClose]);
+
+  if (!photos || photos.length === 0) return null;
+
+  return (
+    <div
+      className="fixed inset-0 bg-black bg-opacity-95 flex items-center justify-center z-[80] p-4"
+      role="dialog"
+      aria-labelledby="photo-gallery-title"
+      aria-modal="true"
+    >
+      <div className="relative w-full max-w-5xl">
+        <button
+          onClick={onClose}
+          className="absolute -top-12 right-0 text-white text-4xl hover:text-red-500"
+          aria-label="Close photo gallery"
+        >
+          &times;
+        </button>
+
+        <div className="bg-white dark:bg-gray-900 rounded-lg overflow-hidden">
+          <img
+            src={photos[index]}
+            alt={`Recipe photo ${index + 1} of ${photos.length}`}
+            className="w-full max-h-[70vh] object-contain"
+          />
+
+          <div className="p-4 flex items-center justify-between bg-gray-100 dark:bg-gray-800">
+            <button
+              onClick={() => setIndex(Math.max(0, index - 1))}
+              disabled={index === 0}
+              className="btn-modal btn-gray"
+              aria-label="Previous photo"
+            >
+              <i className="fas fa-chevron-left"></i>
+            </button>
+
+            <span className="text-gray-700 dark:text-gray-300" role="status">
+              {index + 1} / {photos.length}
+            </span>
+
+            <button
+              onClick={() => setIndex(Math.min(photos.length - 1, index + 1))}
+              disabled={index === photos.length - 1}
+              className="btn-modal btn-gray"
+              aria-label="Next photo"
+            >
+              <i className="fas fa-chevron-right"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ===== FEATURE 24: VIDEO CLIPS PLAYER =====
+const VideoClipsModal = ({ videos, currentIndex, onClose }) => {
+  const [index, setIndex] = useState(currentIndex || 0);
+
+  if (!videos || videos.length === 0) return null;
+
+  return (
+    <div
+      className="fixed inset-0 bg-black bg-opacity-95 flex items-center justify-center z-[80] p-4"
+      role="dialog"
+      aria-labelledby="video-clips-title"
+      aria-modal="true"
+    >
+      <div className="relative w-full max-w-5xl">
+        <button
+          onClick={onClose}
+          className="absolute -top-12 right-0 text-white text-4xl hover:text-red-500"
+          aria-label="Close video player"
+        >
+          &times;
+        </button>
+
+        <div className="bg-white dark:bg-gray-900 rounded-lg overflow-hidden">
+          <video
+            key={index}
+            src={videos[index]}
+            controls
+            autoPlay
+            className="w-full max-h-[70vh]"
+            aria-label={`Recipe video ${index + 1} of ${videos.length}`}
+          />
+
+          {videos.length > 1 && (
+            <div className="p-4 flex items-center justify-between bg-gray-100 dark:bg-gray-800">
+              <button
+                onClick={() => setIndex(Math.max(0, index - 1))}
+                disabled={index === 0}
+                className="btn-modal btn-gray"
+                aria-label="Previous video"
+              >
+                <i className="fas fa-chevron-left"></i>
+              </button>
+
+              <span className="text-gray-700 dark:text-gray-300" role="status">
+                Video {index + 1} / {videos.length}
+              </span>
+
+              <button
+                onClick={() => setIndex(Math.min(videos.length - 1, index + 1))}
+                disabled={index === videos.length - 1}
+                className="btn-modal btn-gray"
+                aria-label="Next video"
+              >
+                <i className="fas fa-chevron-right"></i>
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ===== FEATURE 20: COLLABORATIVE SHARING (CLOUD SYNC STRUCTURE) =====
+const CloudSyncModal = ({ onClose, addToast }) => {
+  const [syncCode, setSyncCode] = useState("");
+  const [isGeneratingCode, setIsGeneratingCode] = useState(false);
+  const [inputCode, setInputCode] = useState("");
+
+  const generateSyncCode = () => {
+    setIsGeneratingCode(true);
+    const code = Math.random().toString(36).substr(2, 8).toUpperCase();
+    setTimeout(() => {
+      setSyncCode(code);
+      setIsGeneratingCode(false);
+      addToast("Sync code generated!", "success");
+    }, 500);
+  };
+
+  const handleConnect = () => {
+    if (inputCode.length >= 6) {
+      addToast(`Demo: Would connect to device with code ${inputCode}`, "info");
+      onClose();
+    } else {
+      addToast("Please enter a valid sync code", "error");
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4"
+      role="dialog"
+      aria-labelledby="cloud-sync-title"
+      aria-modal="true"
+    >
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-2xl modal-scale-enter">
+        <div className="flex justify-between items-center mb-6 border-b border-gray-200 dark:border-gray-600 pb-3">
+          <h2
+            id="cloud-sync-title"
+            className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2"
+          >
+            <i className="fas fa-cloud text-blue-500"></i>
+            Cloud Sync
+          </h2>
+          <button
+            onClick={onClose}
+            className="text-gray-500 hover:text-red-500 text-3xl"
+            aria-label="Close"
+          >
+            &times;
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Generate Code Section */}
+          <div className="bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl p-6 border border-blue-200 dark:border-blue-700">
+            <div className="text-center">
+              <i className="fas fa-share-alt text-4xl text-blue-500 mb-3"></i>
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">
+                Share Your Recipes
+              </h3>
+              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                Generate a code to share your entire recipe collection
+              </p>
+
+              {!syncCode ? (
+                <button
+                  onClick={generateSyncCode}
+                  disabled={isGeneratingCode}
+                  className="btn-modal btn-blue w-full"
+                  aria-label="Generate sync code"
+                >
+                  {isGeneratingCode ? (
+                    <>
+                      <i className="fas fa-spinner fa-spin mr-2"></i>
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <i className="fas fa-key mr-2"></i>
+                      Generate Code
+                    </>
+                  )}
+                </button>
+              ) : (
+                <div className="bg-white dark:bg-gray-900 p-4 rounded-lg shadow-inner">
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wide">
+                    Your Sync Code
+                  </p>
+                  <p className="text-4xl font-mono font-bold text-blue-600 dark:text-blue-400 tracking-widest mb-3">
+                    {syncCode}
+                  </p>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(syncCode);
+                      addToast("Code copied to clipboard!", "success");
+                    }}
+                    className="btn-modal bg-blue-500 hover:bg-blue-600 text-white text-sm w-full"
+                  >
+                    <i className="fas fa-copy mr-2"></i>
+                    Copy Code
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Connect Section */}
+          <div className="bg-gradient-to-br from-green-50 to-teal-50 dark:from-green-900/20 dark:to-teal-900/20 rounded-xl p-6 border border-green-200 dark:border-green-700">
+            <div className="text-center">
+              <i className="fas fa-link text-4xl text-green-500 mb-3"></i>
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">
+                Connect to Device
+              </h3>
+              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                Enter a code to sync recipes from another device
+              </p>
+
+              <input
+                type="text"
+                value={inputCode}
+                onChange={(e) => setInputCode(e.target.value.toUpperCase())}
+                placeholder="Enter sync code"
+                className="modal-input text-center font-mono text-lg tracking-widest mb-4"
+                maxLength="8"
+              />
+
+              <button
+                onClick={handleConnect}
+                disabled={inputCode.length < 6}
+                className="btn-modal btn-green w-full"
+                aria-label="Connect to device"
+              >
+                <i className="fas fa-plug mr-2"></i>
+                Connect
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6 bg-blue-50 dark:bg-blue-900/10 rounded-lg p-4 border border-blue-200 dark:border-blue-800">
+          <div className="flex items-start gap-3">
+            <i className="fas fa-info-circle text-blue-500 mt-0.5"></i>
+            <p className="text-sm text-gray-700 dark:text-gray-300">
+              <strong>Demo Feature:</strong> In production, this would sync your
+              recipes with a real backend server, enabling cross-device
+              synchronization and collaborative sharing.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-6 flex justify-end">
+          <button onClick={onClose} className="btn-modal btn-gray">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Shared Recipe Viewer Component (for QR code scans)
+const SharedRecipeViewer = ({ recipe, onClose }) => {
+  const [currentServings, setCurrentServings] = useState(recipe?.servings || 1);
+  const baseServings = recipe?.servings > 0 ? recipe.servings : 1;
+  const servingsMultiplier = currentServings / baseServings;
+
+  // Safety checks for required arrays
+  const ingredients = recipe?.ingredients || [];
+  const directions = recipe?.directions || [];
+  const tipsAndTricks = recipe?.tipsAndTricks || [];
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-[70] p-4 overflow-y-auto">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-4xl max-h-[95vh] overflow-y-auto modal-scale-enter">
+        <div className="sticky top-0 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-600 p-4 z-10">
+          <div className="flex justify-between items-start">
+            <div className="flex-1">
+              <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">
+                {recipe.name}
+              </h2>
+              <div className="flex flex-wrap gap-2 text-sm text-gray-600 dark:text-gray-400">
+                {recipe.type && <span>🍽️ {recipe.type}</span>}
+                {recipe.cuisine && <span>🌍 {recipe.cuisine}</span>}
+              </div>
+            </div>
+            <button
+              onClick={onClose}
+              className="text-gray-500 hover:text-red-500 text-3xl ml-4"
+              aria-label="Close"
+            >
+              &times;
+            </button>
+          </div>
+        </div>
+
+        <div className="p-6">
+          {recipe.image && (
+            <img
+              src={recipe.image}
+              alt={recipe.name}
+              className="w-full h-64 object-cover rounded-lg mb-6"
+            />
+          )}
+
+          {recipe.description && (
+            <p className="text-gray-700 dark:text-gray-300 mb-6 italic">
+              {recipe.description}
+            </p>
+          )}
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-3 text-center">
+              <i className="fas fa-clock text-blue-500 text-xl mb-1"></i>
+              <p className="text-xs text-gray-600 dark:text-gray-400">Prep</p>
+              <p className="font-bold text-gray-900 dark:text-white">
+                {recipe.prepTime || 0}m
+              </p>
+            </div>
+            <div className="bg-orange-50 dark:bg-orange-900/20 rounded-lg p-3 text-center">
+              <i className="fas fa-fire text-orange-500 text-xl mb-1"></i>
+              <p className="text-xs text-gray-600 dark:text-gray-400">Cook</p>
+              <p className="font-bold text-gray-900 dark:text-white">
+                {recipe.cookTime || 0}m
+              </p>
+            </div>
+            <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-3 text-center">
+              <i className="fas fa-utensils text-green-500 text-xl mb-1"></i>
+              <p className="text-xs text-gray-600 dark:text-gray-400">
+                Servings
+              </p>
+              <p className="font-bold text-gray-900 dark:text-white">
+                {currentServings}
+              </p>
+            </div>
+            <div className="bg-purple-50 dark:bg-purple-900/20 rounded-lg p-3 text-center">
+              <i className="fas fa-star text-purple-500 text-xl mb-1"></i>
+              <p className="text-xs text-gray-600 dark:text-gray-400">
+                Difficulty
+              </p>
+              <p className="font-bold text-gray-900 dark:text-white">
+                {recipe.difficulty || "Medium"}
+              </p>
+            </div>
+          </div>
+
+          <div className="mb-6">
+            <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+              <i className="fas fa-list-ul text-green-500"></i>
+              Ingredients
+            </h3>
+            <ul className="space-y-2">
+              {ingredients.map((ing, idx) => {
+                const { quantity, unit, description } = parseIngredient(ing);
+                const scaledQuantity = quantity
+                  ? quantity * servingsMultiplier
+                  : null;
+                return (
+                  <li
+                    key={idx}
+                    className="flex items-start gap-2 text-gray-700 dark:text-gray-300"
+                  >
+                    <i className="fas fa-check-circle text-green-500 mt-1"></i>
+                    <span>
+                      {scaledQuantity !== null && (
+                        <strong>{formatQuantity(scaledQuantity)} </strong>
+                      )}
+                      {unit && <span>{unit} </span>}
+                      <span>{description}</span>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+
+          <div className="mb-6">
+            <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+              <i className="fas fa-book-open text-blue-500"></i>
+              Directions
+            </h3>
+            <ol className="space-y-3">
+              {directions.map((dir, idx) => (
+                <li key={idx} className="flex gap-3">
+                  <span className="flex-shrink-0 w-8 h-8 bg-blue-500 text-white rounded-full flex items-center justify-center font-bold">
+                    {idx + 1}
+                  </span>
+                  <p className="flex-1 text-gray-700 dark:text-gray-300 pt-1">
+                    {dir}
+                  </p>
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          {tipsAndTricks.length > 0 && (
+            <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4">
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2 flex items-center gap-2">
+                <i className="fas fa-lightbulb text-yellow-500"></i>
+                Tips & Tricks
+              </h3>
+              <ul className="space-y-2">
+                {tipsAndTricks.map((tip, idx) => (
+                  <li
+                    key={idx}
+                    className="text-sm text-gray-700 dark:text-gray-300 flex gap-2"
+                  >
+                    <i className="fas fa-star text-yellow-500 mt-0.5"></i>
+                    <span>{tip}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="mt-6 text-center text-sm text-gray-500 dark:text-gray-400 border-t border-gray-200 dark:border-gray-600 pt-4">
+            <p>📱 Shared via Recipe Manager Pro QR Code</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const rootElement = document.getElementById("root");
 if (rootElement) {
   const reactRoot = ReactDOM.createRoot(rootElement);
-  reactRoot.render(<Cookbook />);
+
+  // Check if this is a shared recipe link via URL hash
+  const urlHash = window.location.hash;
+  const hashMatch = urlHash.match(/#recipe=(.+)/);
+
+  if (hashMatch) {
+    try {
+      const encodedRecipe = hashMatch[1];
+      const decodedData = decodeURIComponent(escape(atob(encodedRecipe)));
+      const compactRecipe = JSON.parse(decodedData);
+
+      // Expand compact data back to full recipe format
+      const sharedRecipe = {
+        name: compactRecipe.n,
+        type: compactRecipe.t,
+        cuisine: compactRecipe.c,
+        description: compactRecipe.d,
+        prepTime: compactRecipe.p,
+        cookTime: compactRecipe.k,
+        servings: compactRecipe.s,
+        difficulty: compactRecipe.df,
+        ingredients: compactRecipe.i,
+        directions: compactRecipe.r,
+        tipsAndTricks: compactRecipe.tt,
+        image: compactRecipe.img,
+      };
+
+      reactRoot.render(
+        <ErrorBoundary>
+          <SharedRecipeViewer
+            recipe={sharedRecipe}
+            onClose={() => {
+              window.location.hash = "";
+              window.location.reload();
+            }}
+          />
+        </ErrorBoundary>,
+      );
+    } catch (error) {
+      console.error("Error loading shared recipe:", error);
+      reactRoot.render(
+        <ErrorBoundary>
+          <Cookbook />
+        </ErrorBoundary>,
+      );
+    }
+  } else {
+    reactRoot.render(
+      <ErrorBoundary>
+        <Cookbook />
+      </ErrorBoundary>,
+    );
+  }
 } else {
   console.error("Root element not found! React app cannot be mounted.");
 }
